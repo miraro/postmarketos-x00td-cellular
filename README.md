@@ -16,6 +16,10 @@ mainline-ish kernel (6.19).
 .
 ├── POSTMARKETOS_X00TD_CELLULAR.md    ← the full writeup. START HERE.
 ├── patches/
+│   ├── platform-enable-msm.patch     ← 1.3 KB / 2 hunks — wires up
+│   │                                    drivers/platform/msm/ in the
+│   │                                    upstream kernel build system.
+│   │                                    Applies to vanilla 6.19.
 │   ├── sdm660-ipa-port-4.19-to-6.19.patch  ← 311 KB / 45 files
 │   │                                          IPA driver port — apply
 │   │                                          AFTER baseline overlay.
@@ -43,22 +47,26 @@ mainline-ish kernel (6.19).
 
 ## Quick start
 
-Three kernel steps + one userspace step:
+Four kernel steps + one userspace step:
 
 ```bash
 # 1. Overlay the Asus 4.19 baseline onto your mainline 6.19 tree
 KERNEL_TREE=/path/to/your/qcom-sdm660-6.19-kernel
 cp -rT vendor-baseline-4.19/ "$KERNEL_TREE"/
 
-# 2. Apply the IPA porting patch (drivers/platform/msm/ipa/ + sps/ + headers)
 cd "$KERNEL_TREE"
+
+# 2. Wire up drivers/platform/msm/ in the upstream build system
+patch -p1 < /path/to/postmarketos-x00td-cellular/patches/platform-enable-msm.patch
+
+# 3. Apply the IPA porting patch
 patch -p1 < /path/to/postmarketos-x00td-cellular/patches/sdm660-ipa-port-4.19-to-6.19.patch
 chmod +x drivers/platform/msm/ipa/ipa_v2/apply-port-patches.sh
 
-# 3. Apply the small rmnet csum patch on upstream rmnet (standalone)
+# 4. Apply the small rmnet csum patch on upstream rmnet (standalone)
 patch -p1 < /path/to/postmarketos-x00td-cellular/patches/rmnet-netif-csum.patch
 
-# 4. Configure / build / flash with:
+# 5. Configure / build / flash with:
 #    CONFIG_IPA=m, CONFIG_RMNET_IPA=m, CONFIG_SPS=m,
 #    CONFIG_SPS_SUPPORT_NDP_BAM=y, CONFIG_IPA_DEBUG=y
 # (full kconfig + DTS reference in POSTMARKETOS_X00TD_CELLULAR.md)
@@ -66,9 +74,10 @@ patch -p1 < /path/to/postmarketos-x00td-cellular/patches/rmnet-netif-csum.patch
 
 Then build & run `vendor-init` on the device to activate the bearer.
 
-This sequence is validated end-to-end — overlaying the baseline on a
-clean upstream rmnet + applying both patches produces a tree byte-
-identical to our reference working state.
+This sequence is validated end-to-end — vanilla 6.19 + baseline overlay
++ all three patches in order produces a tree where all critical
+Makefile / Kconfig / source files match the reference working state
+exactly.
 
 Full instructions, prerequisites, DTS reference, ModemManager
 alternative path, throughput tuning, known caveats, and what is *not*

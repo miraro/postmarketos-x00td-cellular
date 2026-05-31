@@ -1,0 +1,35 @@
+================================================================
+ platform-enable-msm — wire up drivers/platform/msm/ subdirectory
+================================================================
+
+ Two-line additions to vanilla mainline 6.19:
+   drivers/platform/Kconfig  — add 'source "drivers/platform/msm/Kconfig"'
+   drivers/platform/Makefile — add 'obj-$(CONFIG_ARCH_QCOM) += msm/'
+
+ Without these, the kernel build system never descends into the
+ drivers/platform/msm/ subdirectory we ship in vendor-baseline-4.19/
+ — and our IPA driver, BAM/SPS framework, and Kconfig options all
+ stay invisible.
+
+ The drivers/platform/msm/Kconfig and drivers/platform/msm/Makefile
+ themselves are NEW (minimal 4-line and 2-line versions sourcing
+ only sps/ and ipa/) and ship in vendor-baseline-4.19/.
+
+ Standalone patch, applies to vanilla mainline 6.19.
+
+================================================================
+
+--- a/drivers/platform/Kconfig
++++ b/drivers/platform/Kconfig
+@@ -23,3 +23,4 @@
+ 
+ source "drivers/platform/wmi/Kconfig"
+ 
++source "drivers/platform/msm/Kconfig"
+--- a/drivers/platform/Makefile
++++ b/drivers/platform/Makefile
+@@ -15,3 +15,4 @@
+ obj-$(CONFIG_ARM64_PLATFORM_DEVICES)	+= arm64/
+ obj-$(CONFIG_BCM2835_VCHIQ)	+= raspberrypi/
+ obj-$(CONFIG_ACPI_WMI)		+= wmi/
++obj-$(CONFIG_ARCH_QCOM) += msm/

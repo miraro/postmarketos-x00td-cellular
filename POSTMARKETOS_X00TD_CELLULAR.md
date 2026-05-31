@@ -481,18 +481,26 @@ KERNEL_TREE=/path/to/your/qcom-sdm660-6.19-kernel
 #    overridden include/linux headers. Upstream rmnet is left alone.
 cp -rT vendor-baseline-4.19/ "$KERNEL_TREE"/
 
-# 3. Apply the IPA porting patch (drivers/platform/msm/ipa/ + sps/ +
-#    shim headers).
 cd "$KERNEL_TREE"
+
+# 3. Wire up the drivers/platform/msm/ subdirectory in the upstream
+#    kernel build system. Vanilla mainline 6.19 has no msm/ at all —
+#    this tiny 2-hunk patch adds `source` / `obj-y` lines to
+#    drivers/platform/{Kconfig,Makefile}. Without it the kernel build
+#    never descends into the msm/ subdirectory the baseline overlays.
+patch -p1 < /path/to/postmarketos-x00td-cellular/patches/platform-enable-msm.patch
+
+# 4. Apply the IPA porting patch (drivers/platform/msm/ipa/ + sps/ +
+#    shim headers).
 patch -p1 < /path/to/postmarketos-x00td-cellular/patches/sdm660-ipa-port-4.19-to-6.19.patch
 
-# 4. Apply the small standalone rmnet csum patch against upstream
+# 5. Apply the small standalone rmnet csum patch against upstream
 #    mainline rmnet — adds NETIF_F_IP_CSUM / NETIF_F_IPV6_CSUM /
 #    NETIF_F_GRO_HW features so the kernel network stack and IPA HW
 #    cooperate correctly when EGRESS_MAP_CKSUMV4 is enabled.
 patch -p1 < /path/to/postmarketos-x00td-cellular/patches/rmnet-netif-csum.patch
 
-# 5. apply-port-patches.sh is reference-only and NOT re-run by the
+# 6. apply-port-patches.sh is reference-only and NOT re-run by the
 #    patch; its changes are already in the source. Mark executable
 #    for documentation purposes.
 chmod +x drivers/platform/msm/ipa/ipa_v2/apply-port-patches.sh

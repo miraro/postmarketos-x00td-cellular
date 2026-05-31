@@ -43,12 +43,24 @@ vendor-baseline-4.19/
 └── README.md                           (this file)
 ```
 
-67 files / ~2.2 MB / ~55 000 LoC total.
+69 files / ~2.2 MB / ~55 000 LoC total.
+
+`drivers/platform/msm/Kconfig` (4 lines) and
+`drivers/platform/msm/Makefile` (2 lines) are **NOT from Asus** — they
+are minimal new files of our own authorship (the vendor 4.19 versions
+of these reference dozens of unrelated MSM platform drivers we do not
+ship). They live here because the `cp -rT` overlay step is the
+natural place for them.
 
 **NO rmnet.** Vanilla mainline 6.19 already has the upstream rmnet
 driver (`drivers/net/ethernet/qualcomm/rmnet/`); our work uses that
 unchanged with the tiny `rmnet-netif-csum.patch` applied on top.
 Asus 4.19 ships its own downstream rmnet which we do NOT want.
+
+**NO drivers/platform/Kconfig / Makefile.** Those exist in vanilla
+mainline 6.19 and we do NOT overwrite them — the small
+`platform-enable-msm.patch` patch adds one `source` line and one
+`obj-y` line to wire up the msm/ subdirectory.
 
 ## How to use
 
