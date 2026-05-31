@@ -24,7 +24,22 @@ files from session work were intentionally excluded.
 
 ```
 vendor-baseline-4.19/
+├── arch/arm64/
+│   ├── boot/dts/qcom/
+│   │   └── sdm636-asus-x00td.dts      (X00TD device tree — NEW,
+│   │                                     references upstream-provided
+│   │                                     sdm636.dtsi / pm660.dtsi /
+│   │                                     pm660l.dtsi)
+│   └── configs/
+│       └── X00TD_defconfig             (kernel build config — NEW,
+│                                         ~7 800 lines, has all the
+│                                         CONFIG_IPA / CONFIG_SPS /
+│                                         CONFIG_RMNET / etc. enables)
 ├── drivers/platform/msm/
+│   ├── Kconfig                         (NEW — 4 lines, minimal,
+│   │                                     sources only sps + ipa)
+│   ├── Makefile                        (NEW — 2 lines, builds only
+│   │                                     sps + ipa)
 │   ├── ipa/                            (14 files — parent IPA dir:
 │   │                                     ipa_api.*, ipa_common_i.h,
 │   │                                     ipa_rm.c + 6 ipa_rm_*,
@@ -43,14 +58,23 @@ vendor-baseline-4.19/
 └── README.md                           (this file)
 ```
 
-69 files / ~2.2 MB / ~55 000 LoC total.
+72 files / ~2.5 MB total.
 
-`drivers/platform/msm/Kconfig` (4 lines) and
-`drivers/platform/msm/Makefile` (2 lines) are **NOT from Asus** — they
-are minimal new files of our own authorship (the vendor 4.19 versions
-of these reference dozens of unrelated MSM platform drivers we do not
-ship). They live here because the `cp -rT` overlay step is the
-natural place for them.
+Files of **our authorship** (not from Asus) that ship here because
+the `cp -rT` overlay is the natural place for them:
+
+- `drivers/platform/msm/Kconfig` (4 lines, minimal — vendor 4.19's
+  version is 270 lines referencing many MSM drivers we don't ship)
+- `drivers/platform/msm/Makefile` (2 lines, minimal)
+- `arch/arm64/boot/dts/qcom/sdm636-asus-x00td.dts` (X00TD device
+  tree — references upstream-provided `sdm636.dtsi`, `pm660.dtsi`,
+  `pm660l.dtsi` which vanilla mainline 6.19 already has)
+- `arch/arm64/configs/X00TD_defconfig` (kernel build config with
+  CONFIG_IPA=m, CONFIG_RMNET_IPA=m, CONFIG_SPS=m,
+  CONFIG_SPS_SUPPORT_NDP_BAM=y, CONFIG_IPA_DEBUG=y enabled and
+  CONFIG_QCOM_IPA / CONFIG_QCOM_IPA2_LITE / CONFIG_IPA_V2_6L /
+  CONFIG_QCOM_IPA_V2 / CONFIG_QCOM_IPA_V2_HYBRID *disabled* —
+  important to avoid driver conflicts at the same MMIO region).
 
 **NO rmnet.** Vanilla mainline 6.19 already has the upstream rmnet
 driver (`drivers/net/ethernet/qualcomm/rmnet/`); our work uses that
