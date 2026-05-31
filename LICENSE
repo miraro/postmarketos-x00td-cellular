@@ -1,0 +1,19 @@
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 2, June 1991
+
+ Copyright (C) 1989, 1991 Free Software Foundation, Inc.
+ 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+This package is licensed under the GNU General Public License
+version 2. The kernel patch in patches/ inherits the licence of the
+surrounding kernel files (GPL-2.0). The vendor-init userspace tool is
+licensed GPL-2.0 by the package author.
+
+The full text of the GPL-2.0 licence is available at:
+
+    https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+Or, as commonly bundled, in the Linux source tree at COPYING.

@@ -1,0 +1,15 @@
+# Build artefacts
+vendor-init/vendor-init
+vendor-init/*.o
+*.a
+*.so
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
