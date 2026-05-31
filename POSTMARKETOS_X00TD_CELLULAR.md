@@ -457,17 +457,51 @@ and reproduces the full diff to our working 6.19 state — 59 files,
   (port-specific shim/ABI headers — most of these *shrink* the vendor
   Android-only versions down to minimal compile shims).
 
-To apply on a fresh checkout of the vendor 4.19 tree (or any tree
-with the same baseline):
+#### Two-step apply: 4.19 baseline overlay → patch
+
+The patch is generated as a diff from the **Asus 4.19 vendor source
+tree** (not from vanilla mainline 6.19) to our sondy-stripped 6.19
+working state. So a vanilla mainline 6.19 kernel needs the 4.19
+baseline overlaid first, then the patch applies cleanly on top.
+
+The companion `vendor-baseline-4.19/` directory in this package
+ships the exact subset of Asus 4.19 sources needed (~70 files /
+2.2 MB — just the IPA driver, BAM/SPS framework, vendor rmnet, and
+overridden include/linux headers). It is byte-identical to the
+upstream Asus release under GPL-2.0; provenance is documented in
+`vendor-baseline-4.19/README.md`.
 
 ```bash
-cd <vendor-4.19-tree>
-patch -p1 < sdm660-ipa-port-4.19-to-6.19.patch
+# 1. Get a mainline 6.19 kernel tree (linux.git, or any 6.19.y tree).
+KERNEL_TREE=/path/to/your/qcom-sdm660-6.19-kernel
+
+# 2. Overlay the 4.19 baseline onto it. cp -rT merges directories.
+cp -rT vendor-baseline-4.19/ "$KERNEL_TREE"/
+
+# 3. Apply the porting patch.
+cd "$KERNEL_TREE"
+patch -p1 < /path/to/postmarketos-x00td-cellular/patches/sdm660-ipa-port-4.19-to-6.19.patch
+
+# 4. apply-port-patches.sh is reference-only and NOT re-run by the
+#    patch; its changes are already in the source. Mark executable
+#    for documentation purposes.
+chmod +x drivers/platform/msm/ipa/ipa_v2/apply-port-patches.sh
 ```
 
-The patch is idempotent against our own tree — a `patch -R --dry-run`
-on `qcom-sdm660-6.19.y` reports clean, which is what is used to
-re-generate it after working-state edits.
+After this you have a tree byte-equivalent (modulo the deliberately
+stripped sondy) to our working `qcom-sdm660-6.19.y` reference tree.
+
+The patch is idempotent against the reference tree: a `patch -R
+--dry-run` reports clean, which is what is used to re-generate it
+after working-state edits — and the same reverse-apply also proves
+the baseline + patch combination reaches the exact target state.
+
+#### Skipping the patch path entirely
+
+If you have access to our prepared 6.19 kernel branch (currently at
+`sdm660-mainline/linux` on GitHub, branch `ipa-hybrid`), you can
+clone it directly and skip the baseline+patch dance — that tree is
+the working state the patch is generated from.
 
 ### Build vendor-init
 

@@ -17,6 +17,11 @@ mainline-ish kernel (6.19).
 ├── POSTMARKETOS_X00TD_CELLULAR.md    ← the full writeup. START HERE.
 ├── patches/
 │   └── sdm660-ipa-port-4.19-to-6.19.patch  ← 517 KB / 58 files
+├── vendor-baseline-4.19/             ← Asus 4.19 baseline files the
+│                                       patch is generated against.
+│                                       Overlay onto your 6.19 tree
+│                                       BEFORE applying the patch.
+│                                       70 files / ~2.2 MB / GPL-2.0.
 └── vendor-init/                       ← userspace bearer-activation tool
     ├── Makefile
     ├── vendor-init.{c,h}             — main / stage dispatcher
@@ -31,13 +36,25 @@ mainline-ish kernel (6.19).
 
 ## Quick start
 
-Three components:
+Two kernel steps + one userspace step:
 
-1. **Apply the kernel porting patch** to a 4.19 vendor tree (or use a
-   prepared 6.19 fork)
-2. **Build & flash** the kernel with `CONFIG_IPA=m`, `CONFIG_RMNET_IPA=m`,
-   `CONFIG_SPS=m`, `CONFIG_SPS_SUPPORT_NDP_BAM=y`, `CONFIG_IPA_DEBUG=y`
-3. **Build & run** `vendor-init` on the device to activate the bearer
+```bash
+# 1. Overlay the Asus 4.19 baseline onto your mainline 6.19 tree
+KERNEL_TREE=/path/to/your/qcom-sdm660-6.19-kernel
+cp -rT vendor-baseline-4.19/ "$KERNEL_TREE"/
+
+# 2. Apply the porting patch
+cd "$KERNEL_TREE"
+patch -p1 < /path/to/postmarketos-x00td-cellular/patches/sdm660-ipa-port-4.19-to-6.19.patch
+chmod +x drivers/platform/msm/ipa/ipa_v2/apply-port-patches.sh
+
+# 3. Configure / build / flash with:
+#    CONFIG_IPA=m, CONFIG_RMNET_IPA=m, CONFIG_SPS=m,
+#    CONFIG_SPS_SUPPORT_NDP_BAM=y, CONFIG_IPA_DEBUG=y
+# (full kconfig + DTS reference in POSTMARKETOS_X00TD_CELLULAR.md)
+```
+
+Then build & run `vendor-init` on the device to activate the bearer.
 
 Full instructions, prerequisites, DTS reference, ModemManager
 alternative path, throughput tuning, known caveats, and what is *not*
