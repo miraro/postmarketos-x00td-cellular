@@ -24,11 +24,14 @@ files from session work were intentionally excluded.
 
 ```
 vendor-baseline-4.19/
-├── drivers/
-│   ├── net/ethernet/qualcomm/rmnet/    (17 files — vendor's standalone rmnet)
-│   └── platform/msm/
-│       ├── ipa/ipa_v2/                 (31 files — vendor IPA v2.6L driver)
-│       └── sps/                        (13 files — BAM/SPS framework)
+├── drivers/platform/msm/
+│   ├── ipa/                            (14 files — parent IPA dir:
+│   │                                     ipa_api.*, ipa_common_i.h,
+│   │                                     ipa_rm.c + 6 ipa_rm_*,
+│   │                                     ipa_uc_offload_common_i.h,
+│   │                                     Makefile)
+│   ├── ipa/ipa_v2/                     (31 files — vendor IPA v2.6L driver)
+│   └── sps/                            (13 files — BAM/SPS framework)
 ├── include/
 │   ├── linux/
 │   │   ├── msm-bus.h, msm-bus-board.h, ipc_logging.h
@@ -40,7 +43,12 @@ vendor-baseline-4.19/
 └── README.md                           (this file)
 ```
 
-70 files / ~2.2 MB / ~55 000 LoC total.
+67 files / ~2.2 MB / ~55 000 LoC total.
+
+**NO rmnet.** Vanilla mainline 6.19 already has the upstream rmnet
+driver (`drivers/net/ethernet/qualcomm/rmnet/`); our work uses that
+unchanged with the tiny `rmnet-netif-csum.patch` applied on top.
+Asus 4.19 ships its own downstream rmnet which we do NOT want.
 
 ## How to use
 
