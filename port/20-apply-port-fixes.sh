@@ -1826,6 +1826,7 @@ struct device *ipa_get_pdev(void);
 #if IS_ENABLED(CONFIG_IPA)
 int ipa_plat_drv_probe(struct platform_device *pdev_p,
 PORT_EOF
+GUARD='int ipa_sys_setup(struct ipa_sys_connect_params'
 apply_edit "drivers/platform/msm/ipa/ipa_api.h" "ipa_api.h: prototypes for exported dispatcher entry points"
 
 read -r -d '' OLD <<'PORT_EOF' || true
@@ -1857,6 +1858,7 @@ int ipa_rm_add_dependency_sync_from_ioctl(
 /**
  * ipa_rm_add_dependency_sync_from_ioctl() - Create a dependency between 2
 PORT_EOF
+GUARD='no header declares this ioctl-path helper'
 apply_edit "drivers/platform/msm/ipa/ipa_rm.c" "ipa_rm.c: local prototype for the ioctl-path dependency helper"
 
 read -r -d '' OLD <<'PORT_EOF' || true
@@ -1881,6 +1883,7 @@ struct iommu_domain *ipa2_get_smmu_domain_by_type(
 int ipa2_cfg_ep_metadata(u32 clnt_hdl,
 	const struct ipa_ep_cfg_metadata *ep_md);
 PORT_EOF
+GUARD='ipa2_get_smmu_domain_by_type'
 apply_edit "drivers/platform/msm/ipa/ipa_v2/ipa_i.h" "ipa_i.h: declare ipa2_get_smmu_domain_by_type + ipa2_cfg_ep_metadata"
 
 read -r -d '' OLD <<'PORT_EOF' || true
@@ -1931,6 +1934,119 @@ else
 	echo "  [ok]   fortify-safe count guards in debugfs/dma write handlers ($fixed sites)"
 	applied=$((applied+1))
 fi
+
+
+section "SMMU CB attributes from DT (iommu_domain_get_attr removed in 6.5)"
+read -r -d '' OLD <<'PORT_EOF' || true
+	/*
+	 * Prior to these calls to iommu_domain_get_attr(), these
+	 * attributes were set in this function relative to dtsi values
+	 * defined for this driver.  In other words, if corresponding ipa
+	 * driver owned values were found in the dtsi, they were read and
+	 * set here.
+	 *
+	 * In this new world, the developer will use iommu owned dtsi
+	 * settings to set them there.  This new logic below, simply
+	 * checks to see if they've been set in dtsi.  If so, the logic
+	 * further below acts accordingly...
+	 */
+	iommu_domain_get_attr(cb->iommu_domain, DOMAIN_ATTR_S1_BYPASS, &bypass);
+	iommu_domain_get_attr(cb->iommu_domain, DOMAIN_ATTR_FAST, &fast);
+
+	IPADBG(
+	  "WLAN CB PROBE dev=%pK DOMAIN ATTRS bypass=%d fast=%d\n",
+	  dev, bypass, fast);
+PORT_EOF
+read -r -d '' NEW <<'PORT_EOF' || true
+	/* DOMAIN_ATTR_S1_BYPASS / DOMAIN_ATTR_FAST were removed from the
+	 * IOMMU API in 6.5 — mainline describes hardware configuration in
+	 * DT instead of side-channel queries between subsystems. Read the
+	 * optional per-CB sub-node properties; S1 bypass falls back to the
+	 * top-level "qcom,smmu-s1-bypass" on the &ipa node (which is also
+	 * what the datapath decisions in this driver key off).
+	 */
+	bypass = of_property_read_bool(dev->of_node, "qcom,smmu-s1-bypass") ||
+		smmu_info.s1_bypass;
+	fast = of_property_read_bool(dev->of_node, "qcom,iommu-fast-map");
+
+	IPADBG(
+	  "WLAN CB PROBE dev=%pK DT attrs bypass=%d fast=%d\n",
+	  dev, bypass, fast);
+PORT_EOF
+apply_edit "drivers/platform/msm/ipa/ipa_v2/ipa.c" "ipa.c: WLAN CB - read S1-bypass/fast-map from DT instead of removed IOMMU attr API"
+
+read -r -d '' OLD <<'PORT_EOF' || true
+	/*
+	 * Prior to these calls to iommu_domain_get_attr(), these
+	 * attributes were set in this function relative to dtsi values
+	 * defined for this driver.  In other words, if corresponding ipa
+	 * driver owned values were found in the dtsi, they were read and
+	 * set here.
+	 *
+	 * In this new world, the developer will use iommu owned dtsi
+	 * settings to set them there.  This new logic below, simply
+	 * checks to see if they've been set in dtsi.  If so, the logic
+	 * further below acts accordingly...
+	 */
+
+	iommu_domain_get_attr(cb->iommu_domain, DOMAIN_ATTR_S1_BYPASS, &bypass);
+	iommu_domain_get_attr(cb->iommu_domain, DOMAIN_ATTR_FAST, &fast);
+
+	IPADBG("UC CB PROBE dev=%pK DOMAIN ATTRS bypass=%d fast=%d\n",
+		   dev, bypass, fast);
+PORT_EOF
+read -r -d '' NEW <<'PORT_EOF' || true
+	/* DOMAIN_ATTR_S1_BYPASS / DOMAIN_ATTR_FAST were removed from the
+	 * IOMMU API in 6.5 — mainline describes hardware configuration in
+	 * DT instead of side-channel queries between subsystems. Read the
+	 * optional per-CB sub-node properties; S1 bypass falls back to the
+	 * top-level "qcom,smmu-s1-bypass" on the &ipa node (which is also
+	 * what the datapath decisions in this driver key off).
+	 */
+	bypass = of_property_read_bool(dev->of_node, "qcom,smmu-s1-bypass") ||
+		smmu_info.s1_bypass;
+	fast = of_property_read_bool(dev->of_node, "qcom,iommu-fast-map");
+
+	IPADBG("UC CB PROBE dev=%pK DT attrs bypass=%d fast=%d\n",
+		   dev, bypass, fast);
+PORT_EOF
+apply_edit "drivers/platform/msm/ipa/ipa_v2/ipa.c" "ipa.c: uC CB - ditto"
+
+read -r -d '' OLD <<'PORT_EOF' || true
+	/*
+	 * Prior to these calls to iommu_domain_get_attr(), these
+	 * attributes were set in this function relative to dtsi values
+	 * defined for this driver.  In other words, if corresponding ipa
+	 * driver owned values were found in the dtsi, they were read and
+	 * set here.
+	 *
+	 * In this new world, the developer will use iommu owned dtsi
+	 * settings to set them there.  This new logic below, simply
+	 * checks to see if they've been set in dtsi.  If so, the logic
+	 * further below acts accordingly...
+	 */
+	iommu_domain_get_attr(cb->iommu_domain, DOMAIN_ATTR_S1_BYPASS, &bypass);
+	iommu_domain_get_attr(cb->iommu_domain, DOMAIN_ATTR_FAST, &fast);
+
+	IPADBG("AP CB PROBE dev=%pK DOMAIN ATTRS bypass=%d fast=%d\n",
+			dev, bypass, fast);
+PORT_EOF
+read -r -d '' NEW <<'PORT_EOF' || true
+	/* DOMAIN_ATTR_S1_BYPASS / DOMAIN_ATTR_FAST were removed from the
+	 * IOMMU API in 6.5 — mainline describes hardware configuration in
+	 * DT instead of side-channel queries between subsystems. Read the
+	 * optional per-CB sub-node properties; S1 bypass falls back to the
+	 * top-level "qcom,smmu-s1-bypass" on the &ipa node (which is also
+	 * what the datapath decisions in this driver key off).
+	 */
+	bypass = of_property_read_bool(dev->of_node, "qcom,smmu-s1-bypass") ||
+		smmu_info.s1_bypass;
+	fast = of_property_read_bool(dev->of_node, "qcom,iommu-fast-map");
+
+	IPADBG("AP CB PROBE dev=%pK DT attrs bypass=%d fast=%d\n",
+			dev, bypass, fast);
+PORT_EOF
+apply_edit "drivers/platform/msm/ipa/ipa_v2/ipa.c" "ipa.c: AP CB - ditto"
 
 echo
 echo "============================================================"

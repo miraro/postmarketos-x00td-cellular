@@ -9,8 +9,11 @@
  *
  *   - SSR notifier wrappers: SUBSYS_* code defines + inline wrappers
  *     around qcom_register_ssr_notifier(). Used by rmnet_ipa.c.
- *   - iommu_domain_get_attr no-op macro (API removed in 6.5).
  *   - dma_zalloc_coherent fallback macro (defensive — sed also rewrites).
+ *
+ *   - (history) an iommu_domain_get_attr() no-op stub lived here while
+ *     the SMMU attribute reads were unresolved; the call sites now read
+ *     per-CB DT properties instead (20-apply-port-fixes.sh, "smmu").
  *
  * What this header explicitly does NOT do anymore (and why):
  *
@@ -117,40 +120,6 @@ subsys_notif_unregister_notifier(void *notif_handle,
 #ifndef dma_zalloc_coherent
 #define dma_zalloc_coherent(dev, size, dma_handle, gfp) \
 	dma_alloc_coherent((dev), (size), (dma_handle), (gfp))
-#endif
-
-/*=========================================================================
- * IOMMU domain attribute API — removed in 6.5.
- *
- * The vendor IPA v2 driver calls iommu_domain_get_attr() to read whether
- * the SMMU CB is in S1-bypass mode and whether fast-mapping is enabled.
- * Both attributes were part of an enum (DOMAIN_ATTR_S1_BYPASS,
- * DOMAIN_ATTR_FAST) that was removed entirely.
- *
- * For Phase 1 we make iommu_domain_get_attr a no-op. The vendor source
- * already initializes the output variables (`int bypass = 0; int fast = 0;`)
- * before each call, so the no-op leaves them at safe defaults.
- *
- * Phase 2 should replace this with reading explicit DT properties
- * ("qcom,smmu-s1-bypass", "qcom,iommu-dma=fastmap") on the SMMU CB nodes.
- *=========================================================================*/
-
-#ifndef DOMAIN_ATTR_S1_BYPASS
-#define DOMAIN_ATTR_S1_BYPASS		0
-#endif
-#ifndef DOMAIN_ATTR_FAST
-#define DOMAIN_ATTR_FAST		0
-#endif
-
-#ifndef iommu_domain_get_attr
-static inline int ipa_compat_iommu_domain_get_attr(void *domain, int attr,
-						   void *data)
-{
-	return 0;
-}
-#define iommu_domain_get_attr(domain, attr, data) \
-	ipa_compat_iommu_domain_get_attr((void *)(domain), (int)(attr), \
-					 (void *)(data))
 #endif
 
 #endif /* _IPA_COMPAT_H_ */

@@ -399,7 +399,11 @@ the `rmnet_ipa0` netdev.
         modem-remoteproc = <&remoteproc_mss>;
         status = "okay";
 
-        /* SMMU context-bank children — required for SMMU CB probe */
+        /* SMMU context-bank children — required for SMMU CB probe.
+         * Each CB accepts optional qcom,smmu-s1-bypass and
+         * qcom,iommu-fast-map booleans (the 6.x replacement for the
+         * removed iommu_domain_get_attr() side-channel); S1 bypass
+         * falls back to the top-level qcom,smmu-s1-bypass above. */
         qcom,ipa-smmu-ap-cb {
             compatible = "qcom,ipa-smmu-ap-cb";
             iommus = <&anoc2_smmu 0x19C0>;

@@ -91,20 +91,20 @@ SSR callback.
 ### `iommu_domain_get_attr` (removed in 6.5)
 
 **Why:** API and `enum iommu_attr` (containing `DOMAIN_ATTR_S1_BYPASS`,
-`DOMAIN_ATTR_FAST`) were removed entirely. Replacement is per-driver via
-DT or other mechanisms.
+`DOMAIN_ATTR_FAST`) were removed entirely. Mainline's position is that
+hardware configuration belongs in Device Tree, not in side-channel
+queries between subsystems.
 
-**Fix:** Macro stub `#define iommu_domain_get_attr(domain, attr, data) (0)`
-in `ipa_compat.h`. The vendor source already initializes the output
-variables (`int bypass = 0; int fast = 0;`) before each call, so the
-no-op leaves them at safe defaults.
+**Fix:** The six call sites (WLAN/uC/AP CB probes in `ipa.c`) now read
+DT properties instead: optional per-CB `qcom,smmu-s1-bypass` /
+`qcom,iommu-fast-map` on the SMMU CB sub-nodes, with S1 bypass falling
+back to the top-level `qcom,smmu-s1-bypass` on the `&ipa` node — the
+same property the driver's datapath decisions (`smmu_info.s1_bypass`)
+already key off. On v2.6L the per-CB values are informational today;
+the DT hook is there for SoCs that need per-CB control.
 
-This means SDM660 first bring-up will run with **S1 bypass disabled, no
-fast mapping**. If your hardware needs S1 bypass, fix this in Phase 4 by
-reading explicit DT properties on the SMMU CB nodes.
-
-**Affected files (vendor source, no edits):** `ipa.c` six call sites
-(WLAN CB, AP CB, uC CB probes).
+(An earlier revision stubbed the API to return 0 from `ipa_compat.h`;
+that stub is gone.)
 
 ### `dma_zalloc_coherent` (removed in 5.0)
 
