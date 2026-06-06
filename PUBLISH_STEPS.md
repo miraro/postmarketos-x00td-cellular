@@ -31,11 +31,11 @@ gh repo create postmarketos-x00td-cellular --public --source=. --push \
 2. Then:
    ```bash
    cd /path/to/postmarketos-x00td-cellular
-   git remote add origin https://github.com/<your-user>/postmarketos-x00td-cellular.git
+   git remote add origin https://github.com/miraro/postmarketos-x00td-cellular.git
    git push -u origin main
    ```
 
-After push, replace `<your-user>` in the wiki + forum drafts below
+After push, replace `miraro` in the wiki + forum drafts below
 with the actual URL.
 
 ## 2. PostmarketOS wiki edit (draft)
@@ -57,7 +57,7 @@ baseline + a documented, idempotent script pipeline) and a small
 userspace bearer-activation tool ("vendor-init") replacing
 ModemManager for primary cellular.
 
-* Repo: [https://github.com/<your-user>/postmarketos-x00td-cellular postmarketos-x00td-cellular]
+* Repo: [https://github.com/miraro/postmarketos-x00td-cellular postmarketos-x00td-cellular]
 * Status: experimental, out-of-tree driver, not in pmaports yet.
 * What works: Vodafone CZ LTE 20.5 Mbps DL, single primary bearer.
 * What does not: symmetric QMAPv3 UL (opt-in WIP), multi-PDN,
@@ -84,7 +84,7 @@ rmnet NETIF_F_IP_CSUM patch.
 
 Self-contained package (writeup + vendor baseline + script
 pipeline + vendor-init source):
-https://github.com/<your-user>/postmarketos-x00td-cellular
+https://github.com/miraro/postmarketos-x00td-cellular
 
 Caveats: out-of-tree, only primary cellular DL is production-ready,
 QMAPv3 UL is opt-in WIP. Detail in the writeup.
