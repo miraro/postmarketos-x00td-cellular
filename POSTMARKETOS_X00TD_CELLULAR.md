@@ -579,6 +579,44 @@ The critical piece is the `ingress-mapv4-checksum` flag — without it
 the modem-emitted QMAPv3 trailer is not stripped, TCP segments get
 corrupted, and you see ~67 KB/s.
 
+### Where the ceiling actually is (offloads, NAPI, AGG)
+
+A fair question is whether 20.5 Mbps is a driver-imposed ceiling.
+What we know:
+
+- **The arithmetic.** 20 Mbps at ~1400 B/packet is ~1.8 kpps — far
+  below where softirq overhead or NAPI batching starts to matter.
+  The NAPI weight is the vendor's 60 (vs. the kernel default 64);
+  at these packet rates the difference is noise.
+- **DL checksums never touch the CPU.** IPA HW emits the QMAPv3
+  csum trailer, upstream rmnet's `INGRESS_MAP_CKSUMV4` validates it
+  and marks `CHECKSUM_UNNECESSARY` on `qmapmux0.0`.
+- **GRO runs where it should.** Upstream rmnet delivers child-device
+  RX through `gro_cells`, so software GRO aggregates on
+  `qmapmux0.0` regardless of parent-device flags; `vendor-init`
+  additionally enables GRO/`NETIF_F_GRO_HW` knobs in `post_tune`.
+- **Scatter-gather.** The IPA TX path supports non-linear skbs
+  (per-frag BAM descriptors in `ipa2_tx_dp()`), and the port now
+  advertises `NETIF_F_SG` on `rmnet_ipa0` when the DT sets
+  `qcom,ipa-advertise-sg-support`. It is a capability
+  (`hw_features`), not default-on — enable with
+  `ethtool -K rmnet_ipa0 sg on` if you want to avoid UL linearize
+  copies. UL is carrier-shaped on our test SIM, so this was not the
+  bottleneck.
+- **AGG is QMAP's "TSO".** There is no TSO engine on v2.6L; bulk
+  efficiency comes from IPA HW aggregation (6 KB / 10 pkt / 1 ms
+  windows, both directions). We empirically probed larger AGG
+  windows during bringup (phases 4m/4n: 16 K/20) — **no throughput
+  change**, the cap at the test site was carrier-side, not AP-side.
+- **The known AP-side wart** is the ~1 Hz SPS EOT interrupt on the
+  WAN RX pipe, worked around by NAPI re-polling; the
+  `ipa_wan_busypoll` knob exists for experiments on other devices.
+
+So on Vodafone CZ LTE800 the measured 20.5 Mbps tracked the carrier,
+not the driver. On a fatter cell the first things to look at are the
+EOT IRQ workaround and AGG window sizing — the probes from
+`90-apply-diag-sondy.sh` give you the visibility for both.
+
 ---
 
 ## Power-save: dynamic IPA clock scaling (optional)

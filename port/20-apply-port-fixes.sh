@@ -1445,13 +1445,24 @@ read -r -d '' NEW <<'PORT_EOF' || true
 			ipa_rmnet_poll, NAPI_WEIGHT);
 	}
 
+	/* The IPA TX datapath handles non-linear skbs (per-frag BAM
+	 * descriptors in ipa2_tx_dp()), so expose scatter-gather as a
+	 * capability when the DT advertises it — upstream rmnet never asks
+	 * the vendor-era RMNET_IOCTL_GET_SG_SUPPORT ioctl that used to
+	 * carry this flag. Deliberately NOT added to dev->features: the
+	 * default stays the validated linearizing behavior; opt in with
+	 *     ethtool -K rmnet_ipa0 sg on
+	 */
+	if (ipa_rmnet_res.ipa_advertise_sg_support)
+		dev->hw_features |= NETIF_F_SG;
+
 	/* __rmnet_set_netdev_dev_patch__ */
 	SET_NETDEV_DEV(dev, &pdev->dev);
 	ret = register_netdev(dev);
 	if (ret) {
 		IPAWANERR("unable to register ipa_netdev %d rc=%d\n",
 PORT_EOF
-apply_edit "drivers/platform/msm/ipa/ipa_v2/rmnet_ipa.c" "rmnet_ipa.c: netif_napi_add_weight (keep vendor NAPI_WEIGHT=60) + SET_NETDEV_DEV parent"
+apply_edit "drivers/platform/msm/ipa/ipa_v2/rmnet_ipa.c" "rmnet_ipa.c: netif_napi_add_weight (vendor NAPI_WEIGHT=60) + SG capability from DT + SET_NETDEV_DEV parent"
 
 read -r -d '' OLD <<'PORT_EOF' || true
 	return 0;
