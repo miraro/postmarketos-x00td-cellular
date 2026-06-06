@@ -135,18 +135,10 @@ else
 		/* __ipa_arm_smmu_patch__ - required for SMMU CB child node probe */
 		qcom,arm-smmu;
 		qcom,smmu-s1-bypass;
-		qcom,smmu-disable-htw;
 		qcom,modem-cfg-emb-pipe-flt;        /* CRITICAL: modem handles internal filter install */
 		qcom,use-dma-zone;                   /* DMA-capable mem for descriptors */
 		qcom,use-ipa-tethering-bridge;       /* tethering paths */
 		qcom,ipa-wdi2;                       /* WDI 2.0 capability advertise */
-		/* IPA_HW_v2_6L */
-
-		/* Routing/pipe configuration from MASTER V7 vendor config */
-		qcom,pipe-wan = <5>;
-		qcom,rt-idx-wan = <8>;
-		qcom,rt-idx-default = <7>;
-
 		interrupts = <GIC_SPI 333 IRQ_TYPE_LEVEL_HIGH>,    /* IPA - matches Android (was EDGE_RISING) */
 			     <GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>;     /* BAM */
 		interrupt-names = "ipa-irq", "bam-irq";
@@ -165,14 +157,13 @@ else
 
 		dma-coherent;
 
-		/* Bus interconnects (mainline-style; vendor 4.19 driver
-		 * ignores these but they don't hurt) */
+		/* Bandwidth voting paths consumed by msm_bus_compat.c via
+		 * devm_of_icc_get("ipa-mem"/"ipa-imem"); "cpu-cfg" is declared
+		 * for completeness but has no consumer yet. */
 		interconnects = <&a2noc MASTER_IPA &bimc SLAVE_EBI>,
 				<&a2noc MASTER_IPA &snoc SLAVE_IMEM>,
 				<&gnoc MASTER_APSS_PROC &snoc SLAVE_IPA>;
 		interconnect-names = "ipa-mem", "ipa-imem", "cpu-cfg";
-
-		modem-remoteproc = <&remoteproc_mss>;
 
 		status = "okay";
 
@@ -180,19 +171,19 @@ else
 		qcom,ipa-smmu-ap-cb {
 			compatible = "qcom,ipa-smmu-ap-cb";
 			iommus = <&anoc2_smmu 0x19C0>;
-			qcom,iova-mapping = <0x20000000 0x40000000>;
+			qcom,iommu-dma-addr-pool = <0x20000000 0x40000000>;
 		};
 
 		qcom,ipa-smmu-wlan-cb {
 			compatible = "qcom,ipa-smmu-wlan-cb";
 			iommus = <&anoc2_smmu 0x19C1>;
-			qcom,iova-mapping = <0x20000000 0x40000000>;
+			qcom,iommu-dma-addr-pool = <0x20000000 0x40000000>;
 		};
 
 		qcom,ipa-smmu-uc-cb {
 			compatible = "qcom,ipa-smmu-uc-cb";
 			iommus = <&anoc2_smmu 0x19C2>;
-			qcom,iova-mapping = <0x20000000 0x40000000>;
+			qcom,iommu-dma-addr-pool = <0x20000000 0x40000000>;
 		};
 	};
 	rmnet_ipa {
@@ -215,6 +206,7 @@ DEFCONFIG="$SRC_ROOT/arch/arm64/configs/X00TD_defconfig"
 if [ -f "$DEFCONFIG" ]; then
 	echo "  [skip] X00TD_defconfig (already present)"
 else
+	mkdir -p "$(dirname "$DEFCONFIG")"
 	cp "$SCRIPT_DIR/files/arch/arm64/configs/X00TD_defconfig" "$DEFCONFIG"
 	echo "  [ok]   X00TD_defconfig installed"
 fi

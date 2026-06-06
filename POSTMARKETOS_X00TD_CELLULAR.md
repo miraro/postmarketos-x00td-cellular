@@ -362,17 +362,11 @@ the `rmnet_ipa0` netdev.
 
         qcom,arm-smmu;
         qcom,smmu-s1-bypass;
-        qcom,smmu-disable-htw;
         qcom,modem-cfg-emb-pipe-flt;        /* CRITICAL: modem handles
                                                internal filter install */
         qcom,use-dma-zone;
         qcom,use-ipa-tethering-bridge;
         qcom,ipa-wdi2;
-
-        /* Routing/pipe configuration */
-        qcom,pipe-wan = <5>;
-        qcom,rt-idx-wan = <8>;
-        qcom,rt-idx-default = <7>;
 
         interrupts = <GIC_SPI 333 IRQ_TYPE_LEVEL_HIGH>,    /* IPA */
                      <GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>;    /* BAM */
@@ -396,7 +390,6 @@ the `rmnet_ipa0` netdev.
             <&gnoc MASTER_APSS_PROC &snoc SLAVE_IPA>;
         interconnect-names = "ipa-mem", "ipa-imem", "cpu-cfg";
 
-        modem-remoteproc = <&remoteproc_mss>;
         status = "okay";
 
         /* SMMU context-bank children — required for SMMU CB probe.
@@ -407,17 +400,17 @@ the `rmnet_ipa0` netdev.
         qcom,ipa-smmu-ap-cb {
             compatible = "qcom,ipa-smmu-ap-cb";
             iommus = <&anoc2_smmu 0x19C0>;
-            qcom,iova-mapping = <0x20000000 0x40000000>;
+            qcom,iommu-dma-addr-pool = <0x20000000 0x40000000>;
         };
         qcom,ipa-smmu-wlan-cb {
             compatible = "qcom,ipa-smmu-wlan-cb";
             iommus = <&anoc2_smmu 0x19C1>;
-            qcom,iova-mapping = <0x20000000 0x40000000>;
+            qcom,iommu-dma-addr-pool = <0x20000000 0x40000000>;
         };
         qcom,ipa-smmu-uc-cb {
             compatible = "qcom,ipa-smmu-uc-cb";
             iommus = <&anoc2_smmu 0x19C2>;
-            qcom,iova-mapping = <0x20000000 0x40000000>;
+            qcom,iommu-dma-addr-pool = <0x20000000 0x40000000>;
         };
     };
 
@@ -446,6 +439,15 @@ Key non-obvious bits other porters trip over:
 - **`qcom,modem-cfg-emb-pipe-flt`** — without this the AP-side driver
   tries to install WAN filter rules and conflicts with the modem,
   which installs them itself on v2.6L. DL stays at 0 pps.
+- **Property names matter:** the CB sub-nodes use
+  `qcom,iommu-dma-addr-pool` — that is the name the driver reads. An
+  earlier revision shipped `qcom,iova-mapping`, which the driver
+  silently ignored (harmless under S1 bypass, but misleading).
+  Similarly, `qcom,pipe-wan` / `qcom,rt-idx-*` /
+  `qcom,smmu-disable-htw` / `modem-remoteproc` were dropped from the
+  DTS — nothing in this driver reads them (the WAN pipe 5 and
+  rt-table 8/7 values are driver/auto-IPACM constants, and the htw
+  attribute died with the old IOMMU attr API).
 - **`assigned-clock-rates = <200000000>`** pins IPA core_clk at the
   turbo 200 MHz rate. In the **base** port the driver's clk-scaling is
   disabled, so the rate has to come from DT or you get the boot-default
