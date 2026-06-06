@@ -8,8 +8,8 @@ This document describes:
 
 1. What was built and how it differs from the existing
    ModemManager-based bringup
-2. The kernel changes required (out-of-tree IPA driver port plus two
-   small upstream rmnet patches)
+2. The kernel changes required (out-of-tree IPA driver port plus a
+   small upstream-rmnet feature-flag change)
 3. The userspace `vendor-init` tool that replaces ModemManager's
    bearer-activation role
 4. Reproducible build, deploy, and activation steps
@@ -23,10 +23,12 @@ transfer to other SDM6xx devices with minor port effort.
 ## TL;DR
 
 ```
-git clone https://github.com/<your-fork>/linux -b ipa-hybrid
-git clone https://github.com/<your-fork>/postmarketos-tools  # contains vendor-init
-# Build kernel via pmbootstrap as usual for X00TD
-# Build vendor-init: cd vendor-init && make
+git clone https://github.com/<you>/postmarketos-x00td-cellular
+# Kernel: overlay the pristine baseline + run the port pipeline on any
+# mainline-ish 6.19 tree, then build via pmbootstrap as usual for X00TD:
+#     cp -rT postmarketos-x00td-cellular/vendor-baseline-4.19/ $KERNEL_TREE/
+#     postmarketos-x00td-cellular/port/apply-all.sh --root $KERNEL_TREE
+# Build vendor-init: cd postmarketos-x00td-cellular/vendor-init && make
 # Deploy vendor-init binary to /usr/local/sbin/
 # On device, run:
 #     systemctl stop ModemManager
@@ -122,7 +124,10 @@ Lineage 4.19 (`lineage-sdm660-22.2`) to mainline 6.19. This is
 the large piece: roughly 5000+ lines of `drivers/platform/msm/ipa/ipa_v2/`
 adapted for current mainline APIs (dmaengine, IRQ chip, regmap, etc.).
 
-The port lives on branch `ipa-hybrid` of the kernel repo. It is
+The port lives on branch `ipa-hybrid` of the kernel repo, and ships
+in this package in fully reproducible form: a pristine vendor-source
+baseline (`vendor-baseline-4.19/`) plus the `port/` script pipeline
+that transforms it (see *The port as a script pipeline* below). It is
 not yet ready for upstream submission — too many vendor-specific
 heuristics and disabled features — but it is functional and stable
 on X00TD.
@@ -242,7 +247,7 @@ weren't enabled. A safer behavior would be to refuse to set
 defaulting features on is a one-line fix that lets things work as
 expected.
 
-This patch is **necessary if you want UL QMAPv3 (symmetric
+This change is **necessary if you want UL QMAPv3 (symmetric
 config)**. For the asymmetric DL-only QMAPv3 production config —
 which is what we recommend — it's not strictly required.
 
@@ -293,12 +298,12 @@ CONFIG_IPA_DEBUG=y              # debugfs nodes — recommended for bringup
 
 Runtime knobs:
 
-- `qmapv3_ul_enable=0` (`ipa` module param, default off) — opt-in UL
+- `qmapv3_ul_enable=0` (`ipa-driver` module param, default off) — opt-in UL
   QMAPv3 EGRESS pipe 4 reconfiguration. Leave at 0 for production; only
   flip on if you are debugging symmetric UL QMAPv3 (still WIP, see
   "Known caveats").
 
-### Required DTS regulator (`vreg_l16a_2p7`)
+### Required DTS regulators (always-on rails)
 
 The IPA / modem-RF chain on SDM636 needs the PMIC LDO16 rail kept on
 to power the antenna front-end. Without `regulator-always-on` the rail
@@ -450,7 +455,7 @@ The full block is in
 it to an existing in-tree X00TD DTS, or installs the whole reference
 file when the tree has none.
 
-#### The port as a script pipeline
+### The port as a script pipeline
 
 The port ships as a pristine vendor-source baseline plus a pipeline of
 idempotent, self-documenting shell scripts — every transformation is
@@ -847,8 +852,7 @@ Vendor relies on the IPACM daemon to refresh modem-side HW NAT cache
 entries via QMI (`IPACM_ConntrackClient::UpdateUDPTimeStamp`,
 ~every 20 s). Without it, idle UDP flows age out of the modem's NAT
 cache and the first packets on a new flow get exception-looped to
-the AP — visible as bursty connection setup latency
-(see [[project-modem-nat-conntrack-timeout]]).
+the AP — visible as bursty connection setup latency.
 
 Mainline workarounds:
 - `qmapv3_ul_enable=0` (default) — uses IPA HW exception loopback
@@ -898,7 +902,7 @@ Why we don't need it on our target:
 
 | IPACM responsibility | Why we get away without it |
 |---|---|
-| (1) Datapath setup | Three ioctls — `SET_EGRESS=0x06`, `SET_INGRESS=0x3e`, `ADD_MUX mux=1` — done **once** by the in-kernel **`vendor_auto_ipacm_init_fn`** hook (`vendor_auto_ipacm_init_fn()` in `rmnet_ipa.c`), fired automatically off `ipa_q6_handshake_complete()` with a 3 s delay. After that, the datapath stays up indefinitely. |
+| (1) Datapath setup | Three ioctls — `SET_EGRESS=0x06`, `SET_INGRESS=0x3e`, `ADD_MUX mux=1` — done **once** by the in-kernel **`vendor_auto_ipacm_init_fn()`** hook in `rmnet_ipa.c`, fired automatically off `ipa_q6_handshake_complete()` with a 3 s delay. After that, the datapath stays up indefinitely. |
 | (2) Filter rules | v2.6L modem installs its own filter rules via the `qcom,modem-cfg-emb-pipe-flt` DT property — AP-side filter install is a no-op. |
 | (3) NAT timestamp refresh | Userspace `ping -i 5 $gw` keepalive as documented above. Not pretty but functional. |
 | (4) Netlink-driven dynamic rules | Single static bearer; no dynamic events to react to. |
@@ -960,10 +964,10 @@ needs adding by the operator. The latter is currently untested.
 
 ### Driver concessions to MM detection
 
-These were the result of a 150 h debugging arc; see
-[[reference_modemmanager_integration_howto]] in the project memory
-or the comments at `rmnet_ipa.c:2550–2615` for the full cascade.
-What ships in the patch:
+These were the result of a 150 h debugging arc; the full cascade is
+documented in the comments around the `rmnet_ipa_driver` definition
+in `rmnet_ipa.c` (installed by `20-apply-port-fixes.sh`, section
+"ModemManager integration"). What ships in the port:
 
 1. **`platform_driver.name = "ipa"`** (rmnet_ipa_driver)
 
@@ -1070,11 +1074,11 @@ expect to debug.
 
 ## Other in-tree IPA driver attempts (research-grade, NOT finished)
 
-The shipped patch contains only the `ipa_v2/` driver under
+This package ships only the `ipa_v2/` driver under
 `drivers/platform/msm/ipa/`. The full working tree at
 `qcom-sdm660-6.19.y` additionally carries **three abandoned /
 in-progress alternative IPA drivers** under `drivers/net/`. They
-are **deliberately not in the porting patch** — each represents a
+are **deliberately not part of this package** — each represents a
 different exploration path that either ran into a wall or
 overlapped with the shipped driver.
 
@@ -1087,12 +1091,13 @@ exist as starting points; do not enable them in production.
 | `ipa_v2_hybrid` | `drivers/net/ipa_v2_hybrid/` | ~20 200 | `CONFIG_QCOM_IPA_V2_HYBRID` | Mainline structure + 4.19 BAM backend, reached lite parity but DL never opens — definitive close |
 | `ipa_v2_6L` | `drivers/net/ipa_v2_6L/` | ~7 400 | `CONFIG_IPA_V2_6L` | Clean-room mainline-style driver, reached MM bearer-connect milestone, BAM IRQ for completions still missing |
 
-DTS support for all three is in place:
-`arch/arm64/boot/dts/qcom/sdm636-asus-x00td.dts` ships three
-mutually-exclusive nodes — `ipa@14780000` (vendor port, default
-`okay`), `ipa_hybrid@147c0000` (`disabled`), `ipa_v2_6L@147c0000`
-(`disabled`). Only one can be `okay` at a time because they all
-target the same physical IPA hardware.
+In the research tree's DTS the three drivers have mutually-exclusive
+nodes — `ipa@14780000` (vendor port, `okay`), `ipa_hybrid@147c0000`
+(`disabled`), `ipa_v2_6L@147c0000` (`disabled`); only one can be
+`okay` at a time because they all target the same physical IPA
+hardware. The DTS shipped in **this package carries only the vendor
+port node** — the research nodes were dropped because their drivers
+are not included.
 
 ### `ipa2-lite`
 
@@ -1153,12 +1158,12 @@ drivers matter only if:
   → `ipa_v2_hybrid` was that bet; refer to its post-mortem before
   spending hours rediscovering the same wall
 
-To get any of them on a fresh tree you also need their DTS nodes
-flipped to `status="okay"` and the corresponding vendor nodes to
-`"disabled"` — they share the IPA MMIO region with the shipped
-driver, only one can probe at a time. None of this is wired into
-the porting patch; treat them as a parallel research branch
-available in our working tree, not as supported configurations.
+To get any of them on a fresh tree you also need to add their DTS
+nodes (`status="okay"`) and flip the vendor node to `"disabled"` —
+they share the IPA MMIO region with the shipped driver, only one can
+probe at a time. None of this is wired into this package; treat them
+as a parallel research branch available in our working tree, not as
+supported configurations.
 
 ---
 
@@ -1242,13 +1247,13 @@ include/{net,soc/qcom,uapi/linux}/…   — stub + vendor UAPI headers
 
 ## License / contribution
 
-Kernel patches: GPL-2.0 (matching surrounding files).
-`vendor-init`: GPL-2.0.
+Kernel sources, scripts and patches: GPL-2.0 (matching surrounding
+files). `vendor-init`: GPL-2.0.
 
 Feedback, patches, or independent testing on other SDM6xx devices
 welcome. The IPA driver port has lots of cleanup left before
-upstreaming becomes plausible; the rmnet IP\_CSUM patch and
-`vendor-init` itself are in better shape to share.
+upstreaming becomes plausible; the rmnet IP\_CSUM feature-flag change
+and `vendor-init` itself are in better shape to share.
 
 ---
 
