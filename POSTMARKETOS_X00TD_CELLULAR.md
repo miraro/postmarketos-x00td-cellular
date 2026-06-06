@@ -145,7 +145,7 @@ for upstream review independently — see Section C below.
 Standalone 8-stage cellular bringup binary. Statically linked (no
 glibc dependency on device), about 676 KB ARM aarch64.
 
-Source: `trace/vendor-init/` in this repo. About 1900 LoC of
+Source: `vendor-init/` in this repo. About 1900 LoC of
 plain C99, single dependency on `linux/qrtr.h` for `AF_QIPCRTR`.
 
 Pipeline:
@@ -215,7 +215,8 @@ csum header and sends the frame. The modem receives a malformed UL
 frame and drops it — silently. Symptom: 100 % packet loss on UL once
 you enable `EGRESS_MAP_CKSUMV4`, with no kernel error message.
 
-Patch (commit `0031ea860581`):
+The change (applied by `port/05-integrate-mainline-tree.sh`; original
+commit `0031ea860581`):
 
 ```diff
 --- a/drivers/net/ethernet/qualcomm/rmnet/rmnet_vnd.c
@@ -261,8 +262,12 @@ both kernel and userspace builds.
 
 ### Build the kernel
 
+Either clone the prepared branch, or — recommended — produce the tree
+yourself from any mainline-ish 6.19 kernel with this package's script
+pipeline (see *The port as a script pipeline* below):
+
 ```bash
-# Clone our IPA v2.6L port branch
+# Option A: clone our IPA v2.6L port branch
 cd ~/pmbootstrap/linux
 git clone -b ipa-hybrid <your-fork-of-qcom-sdm660-6.19.y> qcom-sdm660-6.19.y
 cd qcom-sdm660-6.19.y
@@ -312,9 +317,13 @@ vreg_l16a_2p7: l16 {
 };
 ```
 
-This block is already present in
-`arch/arm64/boot/dts/qcom/sdm636-asus-x00td.dts` in our 6.19 tree;
-mirror it onto other SDM6xx boards if you are adapting this port.
+One more rail, **`vreg_l7a_1p2` (1.2 V), also needs
+`regulator-always-on`**. This one is an empirical bringup carry-over
+from the proven-working tree — it was never isolated which consumer
+needs it held, but the working 20.5 Mbps configuration has it pinned,
+so the port keeps it. Both rails are handled automatically by
+`port/05-integrate-mainline-tree.sh`; mirror them onto other SDM6xx
+boards if you are adapting this port.
 
 ### Required DTS nodes (SPS / IPA / rmnet)
 
@@ -429,102 +438,65 @@ Key non-obvious bits other porters trip over:
   tries to install WAN filter rules and conflicts with the modem,
   which installs them itself on v2.6L. DL stays at 0 pps.
 - **`assigned-clock-rates = <200000000>`** pins IPA core_clk at the
-  turbo 200 MHz rate. The driver's own clk-scaling path is bypassed
-  in this port (see `msm_bus_compat.c`), so the rate has to come from
-  DT or you get the boot-default ~75 MHz and a ~3.4× latency hit.
+  turbo 200 MHz rate. In the **base** port the driver's clk-scaling is
+  disabled, so the rate has to come from DT or you get the boot-default
+  ~75 MHz and a ~3.4× latency hit. If you apply the optional power-save
+  patch + overlay (see **Power-save: dynamic IPA clock scaling** below),
+  the driver owns the rate instead and this pin should be dropped.
 
 The full block is in
-`arch/arm64/boot/dts/qcom/sdm636-asus-x00td.dts` lines 688–953 — copy
-that file as the canonical reference rather than hand-typing.
+`port/files/arch/arm64/boot/dts/qcom/sdm636-asus-x00td.dts` (the
+`&soc` section at the end) — `05-integrate-mainline-tree.sh` appends
+it to an existing in-tree X00TD DTS, or installs the whole reference
+file when the tree has none.
 
-#### Or apply on top of any 6.19 vendor 4.19 tree
+#### The port as a script pipeline
 
-A self-contained porting patch is shipped at
-`trace/vendor-init/sdm660-ipa-port-4.19-to-6.19.patch`. It is generated
-against the original Asus 4.19 vendor sources at
-[android_kernel_asus_sdm660](https://github.com/MiCode/android_kernel_asus_sdm660)
-and reproduces the full diff to our working 6.19 state — 59 files,
-~19 600 lines, covering:
-
-- `drivers/platform/msm/ipa/ipa_v2/` (full driver port, plus the new
-  shim files `ipa_compat.h`, `ipa_disabled_stubs.c`, `msm_bus_compat.c`,
-  and the mechanical preprocessor script `apply-port-patches.sh`)
-- `drivers/platform/msm/sps/` (BAM/SPS framework port + new Kconfig)
-- `drivers/net/ethernet/qualcomm/rmnet/` (rmnet upstream wrap +
-  `NETIF_F_IP_CSUM` feature flag patch)
-- `include/linux/{msm-bus,msm-bus-board,ipc_logging,msm_gsi,ipa_wdi3,
-  msm-sps,ipa,if_rmnet}.h` and `include/uapi/linux/msm_ipa.h`
-  (port-specific shim/ABI headers — most of these *shrink* the vendor
-  Android-only versions down to minimal compile shims).
-
-#### Two-step apply: 4.19 baseline overlay → patch
-
-The patch is generated as a diff from the **Asus 4.19 vendor source
-tree** (not from vanilla mainline 6.19) to our sondy-stripped 6.19
-working state. So a vanilla mainline 6.19 kernel needs the 4.19
-baseline overlaid first, then the patch applies cleanly on top.
-
-The companion `vendor-baseline-4.19/` directory in this package
-ships the exact subset of Asus 4.19 sources needed (~70 files /
-2.2 MB — just the IPA driver, BAM/SPS framework, vendor rmnet, and
-overridden include/linux headers). It is byte-identical to the
-upstream Asus release under GPL-2.0; provenance is documented in
-`vendor-baseline-4.19/README.md`.
+The port ships as a pristine vendor-source baseline plus a pipeline of
+idempotent, self-documenting shell scripts — every transformation is
+visible, grep-able, and explained in place:
 
 ```bash
-# 1. Get a mainline 6.19 kernel tree (linux.git, or any 6.19.y tree).
+# 1. Get a mainline 6.19 kernel tree (linux.git, pmOS 6.19.y, …).
 KERNEL_TREE=/path/to/your/qcom-sdm660-6.19-kernel
 
-# 2. Overlay the 4.19 baseline onto it. cp -rT merges directories.
-#    The baseline contains ONLY what the IPA patch needs as its
-#    "before" state — IPA driver source, BAM/SPS framework, and
-#    overridden include/linux headers. Upstream rmnet is left alone.
+# 2. Overlay the pristine 4.19 baseline (75 vendor files, byte-identical
+#    to lineage-sdm660-22.2 — provenance in vendor-baseline-4.19/README.md).
 cp -rT vendor-baseline-4.19/ "$KERNEL_TREE"/
 
-cd "$KERNEL_TREE"
-
-# 3. Wire up the drivers/platform/msm/ subdirectory in the upstream
-#    kernel build system. Vanilla mainline 6.19 has no msm/ at all —
-#    this tiny 2-hunk patch adds `source` / `obj-y` lines to
-#    drivers/platform/{Kconfig,Makefile}. Without it the kernel build
-#    never descends into the msm/ subdirectory the baseline overlays.
-patch -p1 < /path/to/postmarketos-x00td-cellular/patches/platform-enable-msm.patch
-
-# 4. Apply the IPA porting patch (drivers/platform/msm/ipa/ + sps/ +
-#    shim headers).
-patch -p1 < /path/to/postmarketos-x00td-cellular/patches/sdm660-ipa-port-4.19-to-6.19.patch
-
-# 5. Apply the small standalone rmnet csum patch against upstream
-#    mainline rmnet — adds NETIF_F_IP_CSUM / NETIF_F_IPV6_CSUM /
-#    NETIF_F_GRO_HW features so the kernel network stack and IPA HW
-#    cooperate correctly when EGRESS_MAP_CKSUMV4 is enabled.
-patch -p1 < /path/to/postmarketos-x00td-cellular/patches/rmnet-netif-csum.patch
-
-# 6. apply-port-patches.sh is reference-only and NOT re-run by the
-#    patch; its changes are already in the source. Mark executable
-#    for documentation purposes.
-chmod +x drivers/platform/msm/ipa/ipa_v2/apply-port-patches.sh
+# 3. Run the pipeline.
+./port/apply-all.sh --root "$KERNEL_TREE"
 ```
 
-After this you have a tree byte-equivalent (modulo the deliberately
-stripped sondy) to our working `qcom-sdm660-6.19.y` reference tree.
+The pipeline stages:
 
-The patch is idempotent against the reference tree: a `patch -R
---dry-run` reports clean, which is what is used to re-generate it
-after working-state edits — and the same reverse-apply also proves
-the baseline + patch combination reaches the exact target state.
+| Script | What it does |
+|---|---|
+| `00-install-port-files.sh` | installs the new/replaced whole files: minimal Kconfig/Makefile set, `ipa_compat.h` shim, `ipa_disabled_stubs.c`, `msm_bus_compat.c` (msm_bus→icc translator), stub headers |
+| `05-integrate-mainline-tree.sh` | wires `drivers/platform/msm/` into the upstream build system, prepares the X00TD DTS (appends the IPA/SPS/rmnet `&soc` block to an existing in-tree DTS — postmarketOS 6.19 already ships one — or installs the full reference), installs `X00TD_defconfig`, and adds the rmnet UL-csum feature flags |
+| `10-apply-port-patches.sh` | the mechanical 4.19→6.x API conversion (class_create, dma_zalloc, strlcpy, IS_ENABLED gating, …) |
+| `20-apply-port-fixes.sh` | bringup-correctness fixes: clock/IRQ probe fixes, wakelock neutralization, TX-event handling, ModemManager integration, SSR robustness, plus the modern-kbuild hard-error fixes (missing prototypes, fortify-safe copy guards, …) |
+| `30-apply-port-features.sh` | the throughput features: in-kernel IPACM emulation, Q6 filter-rule install fixes, the `qmapv3_ul_enable` knob, icc bandwidth voting, A/B datapath knobs |
+| `90-apply-diag-sondy.sh` | **optional** — the curated bringup-diagnostics set; see *Debug instrumentation (sondy)* |
 
-#### Skipping the patch path entirely
+Each edit is guarded: already-applied changes are skipped (the whole
+pipeline is idempotent), and any unexpected tree state aborts with a
+clear message instead of silently mis-applying. The pipeline output —
+pristine baseline + scripts — compiles warning-free against the modern
+kbuild default-error set and was re-validated on the device on
+2026-06-06: 20.6 Mbps DL sustained (`curl` against cachefly over
+`qmapmux0.0`, Vodafone CZ LTE), matching the original bringup figure.
 
-If you have access to our prepared 6.19 kernel branch (currently at
-`sdm660-mainline/linux` on GitHub, branch `ipa-hybrid`), you can
-clone it directly and skip the baseline+patch dance — that tree is
-the working state the patch is generated from.
+One practical note from that re-validation: right after boot the modem
+may camp on GSM for a while (DL ~15 KB/s). The selection preference
+already lists LTE first — just wait for the LTE attach (watch
+`qmicli -d qrtr://0 --nas-get-serving-system`) before judging
+throughput.
 
 ### Build vendor-init
 
 ```bash
-cd ~/pmbootstrap/linux/trace/vendor-init
+cd vendor-init
 make
 # Produces ./vendor-init — ARM aarch64 static binary, ~676 KB
 ```
@@ -600,6 +572,76 @@ corrupted, and you see ~67 KB/s.
 
 ---
 
+## Power-save: dynamic IPA clock scaling (optional)
+
+By default the port runs the IPA core clock at a fixed rate (DT-pinned
+200 MHz, driver-nominal 150 MHz) — `enable_clock_scaling` is 0 and the
+IPA Resource Manager, although fully compiled and wired (see *What's NOT
+ported §3*), never moves the clock. This is the simplest, known-good
+configuration and is what the 20.5 Mbps DL figure was measured on.
+
+Two opt-in artefacts re-enable dynamic, load-following clock scaling so
+the core clock can drop when the link is idle:
+
+| Artefact | What it changes |
+|---|---|
+| `patches/sdm660-ipa-port-6.19-powersave.patch` | `ipa_v2/ipa.c`: `enable_clock_scaling = 1`, and retunes the v2.0 bandwidth thresholds (nominal 600→50, turbo 1000→150 Mbps) so the cellular RM vote actually moves the clock. Boot stays at TURBO for the Q6 handshake. |
+| `dts/sdm636-asus-x00td-ipa-powersave.dtso` | DT **overlay** dropping the `assigned-clocks` / `assigned-clock-rates = <200000000>` pin from `&ipa`, handing the rate to the driver. Clocks and interconnects inherited unchanged. |
+| `patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch` | Drops the `.dtso` into `arch/arm64/boot/dts/qcom/` and registers it as a `.dtbo` build target in the qcom Makefile (for overlay-capable boot chains). |
+| `patches/sdm636-asus-x00td-ipa-powersave-dts.patch` | The same pin removal as a **direct patch** to `sdm636-asus-x00td.dts`, for boot chains that cannot apply overlays. |
+
+Pick the DT side **one** way: the direct DTS patch *or* the overlay
+(`.dtso` + `.dtbo` registration) — not both.
+
+**Why the threshold retune is mandatory.** The vendor v2.0 thresholds
+(nominal 600 / turbo 1000 Mbps) target gigabit WLAN-offload. The cellular
+RM perf profile only votes ~100 Mbps, so with the stock thresholds *every*
+check falls through to SVS = 75 MHz even under data load — which would
+**halve** the clock vs the working NOMINAL and throttle the link. That is
+exactly why the base port disabled scaling. The retune lands the ~100 Mbps
+active vote on NOMINAL (the proven 20.5 Mbps DL rate) while still allowing
+SVS at idle.
+
+**Resulting behaviour**
+
+| State | IPA core_clk |
+|---|---|
+| fully idle | gated off (active-clients refcount — already, unchanged) |
+| active data (RM ~100 Mbps vote) | NOMINAL 150 MHz |
+| active but unvoted | SVS 75 MHz *(new idle-ish saving)* |
+| > 150 Mbps burst | TURBO 200 MHz |
+
+**Apply**
+
+```bash
+# on top of the base port (after port/apply-all.sh)
+patch -p1 < patches/sdm660-ipa-port-6.19-powersave.patch
+# then drop the DT clock pin — pick ONE:
+#   (a) direct DTS patch (simplest, works everywhere):
+patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dts.patch
+#   (b) or the overlay route (overlay-capable boot): register + build the
+#       .dtbo, then fdtoverlay it onto the base .dtb at package time:
+patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch
+#       (the base .dtb must be built with symbols — add
+#        "DTC_FLAGS_sdm636-asus-x00td += -@" to the qcom Makefile)
+```
+
+**Caveats**
+
+- **Not hardware-tested.** Re-measure DL/UL after applying. If SVS proves
+  too slow for your link, raise `clock_scaling_bw_threshold_nominal`; for
+  more throughput headroom, lower `clock_scaling_bw_threshold_turbo` so the
+  active vote reaches TURBO.
+- **Coarse, not finely load-following.** True throughput-proportional
+  scaling needs IPACM/QMI to update the RM perf profiles at runtime; with
+  the static 100 Mbps profile the clock is effectively idle-gated vs
+  active-NOMINAL.
+- Leaving the DT pin in place does *not* break the patch (the driver still
+  scales via `clk_set_rate`), but the rail won't drop at idle and the pin
+  is misleading — hence the overlay.
+
+---
+
 ## Known caveats
 
 ### Symmetric QMAPv3 UL is not fully working
@@ -663,117 +705,72 @@ patch (Section C) is a small standalone candidate.
 
 ## Debug instrumentation (sondy)
 
-The driver carries ~128 in-tree probes (called "sondy" — Czech for
-*probes*) that were essential to reach the working state and remain
-in the source as the canonical bringup-diagnosis toolkit. They are
-organised into **three tiers**, gated differently because their
-overhead differs by orders of magnitude.
+The bringup was carried by ~130 in-tree probes (called "sondy" — Czech
+for *probes*). The production tree ships **clean** — all of them now
+live in the opt-in script **`port/90-apply-diag-sondy.sh`**, curated
+for one purpose: porting this driver to *other* SDM6xx devices. Apply
+it on top of the full pipeline; never ship a production build with it
+(the per-packet probes collapse throughput and even the rare-event ones
+spam dmesg).
 
-### Tier 1 — `IPA_SONDA()` macro (default ON, ftrace sink)
+The probes are organised into **three tiers**, gated differently
+because their overhead differs by orders of magnitude.
 
-Defined in `drivers/platform/msm/ipa/ipa_v2/ipa_i.h:36`:
+### Tier 1 — `IPA_SONDA()` macro (ftrace sink, default ON)
+
+Installed into `ipa_i.h`:
 
 ```c
-extern int ipa_rev_eng_active;     // = 1 at boot, EXPORT_SYMBOL'd
+extern int ipa_rev_eng_active;     /* module param, default 1 */
 
 #define IPA_SONDA(fmt, ...) \
-    do { \
-        if (ipa_rev_eng_active) { \
-            trace_printk("[IPA_SONDA] %s: " fmt, __func__, ##__VA_ARGS__); \
-        } \
-    } while (0)
+	do { \
+		if (ipa_rev_eng_active) \
+			trace_printk("[IPA_SONDA] %s: " fmt, \
+				     __func__, ##__VA_ARGS__); \
+	} while (0)
 ```
 
-- Sink: **ftrace ring buffer** (`/sys/kernel/debug/tracing/trace`),
-  not dmesg. Cheap; no console serialization.
-- Default: **ON** at boot — these are low-volume events (QMI
-  handshake messages, GOLDEN_DATA dumps, MMIO reg ops at probe).
-- Toggle: `ipa_rev_eng_active` is a kernel symbol, not a module param,
-  so flipping it live needs bpf/livepatch. In practice it stays on
-  because the events it gates are bounded.
-- Tags: `[IPA_SONDA]` prefix + per-callsite sub-tags like `[QMI_RX]`,
-  `[QMI_TX]`, `[QMI_INIT]`, `[GOLDEN_DATA]`, `[MMIO_R]`, `[MMIO_W]`.
+- Sink: **ftrace ring buffer**, not dmesg. Cheap; no console
+  serialization.
+- For low-volume semantic events — sprinkle your own calls while
+  bringing up a new device.
+- Toggle live: `/sys/module/<ipa module>/parameters/ipa_rev_eng_active`.
 
 Reading them:
 
 ```bash
-sudo cat /sys/kernel/debug/tracing/trace | grep IPA_SONDA
-# or live:
 sudo cat /sys/kernel/debug/tracing/trace_pipe | grep IPA_SONDA
 ```
 
-### Tier 2 — `ipa_sonda_dbg` module param (default OFF, hot-path)
+### Tier 2 — `IPA_SONDA_DBG()` / `ipa_sonda_dbg` param (dmesg, default OFF)
 
-Defined in `drivers/platform/msm/ipa/ipa_v2/ipa_dp.c:20-22`:
+For per-packet hot-path probes (the script gates `[WAN_RX_IOV]` and
+`[IRQ_STTS_DIAG]` on it). Throughput collapses from 20 Mbps to
+single-digit Mbps when on, so only enable for short windows:
 
-```c
-static int ipa_sonda_dbg;
-module_param(ipa_sonda_dbg, int, 0644);
-MODULE_PARM_DESC(ipa_sonda_dbg, "Enable per-packet IPA debug sondas (slow)");
+```bash
+echo 1 | sudo tee /sys/module/<ipa module>/parameters/ipa_sonda_dbg
 ```
 
-- Sink: **dmesg** via `printk(KERN_ERR …)` (slow; console latency).
-- Default: **OFF**. Per-packet sondy on the TX/RX/NAPI/SPS hot path.
-  Throughput collapses from 20 Mbps to single-digit Mbps when on,
-  so leave off in production.
-- Toggle at runtime, no reboot needed:
+### Tier 3 — always-on tagged one-shots (rate-bounded)
 
-  ```bash
-  echo 1 | sudo tee /sys/module/ipa/parameters/ipa_sonda_dbg   # ON
-  echo 0 | sudo tee /sys/module/ipa/parameters/ipa_sonda_dbg   # OFF
-  ```
+The bulk of the script: `pr_err`/`pr_info` probes on rare paths that
+fire at most a handful of times per attach. Families installed:
 
-- Tags: `[SPS_TX_SONDA]`, `[SPS_RX_SONDA]`, `[NAPI_POLL_SONDA]`,
-  `[TX_PATH_SONDA]`, `[RX_PATH_SONDA]`, `[RX_SEQ_SONDA]`,
-  `[WAN_RX_IOV_SONDA]`. The `[RX_SEQ_SONDA]` one parses the TCP seq
-  number out of the RX buffer as the modem wrote it — used during
-  the QMAPv3 DL trailer investigation to prove ordering and identify
-  the throughput bottleneck.
+| Tags | What they show |
+|---|---|
+| `[QMI_DIAG]` `[AP_READY]` `[INIT_DRV_DIAG]` `[GOLDEN_DATA]` | the whole QMI handshake: service discovery, INIT_DRIVER memory map, INIT_COMPLETE_IND paths, TLV 0x12 echo |
+| `[QMI_FILTER_DIAG]` `[INSTALL_WIRE]` `[FLT_INSTALL]` `[GOLDEN_FLT]` `[GOLDEN_RT]` `[DUMP_RT_*]` | what really lands in the IPA HW filter/routing tables, wire-level |
+| `[SETUP_PIPE_DIAG]` `[INGRESS_DIAG]` `[NUM_Q6_DIAG]` `[EMB_PIPE_DIAG]` `[TX_EXCP]` `[EMPTY_RT_DIAG]` `[NO_AGG]` | pipe setup and datapath decisions |
+| `[AUTO_IPACM]` `[ICMP_RULE]` `[MCAST_BCAST]` `[WAN_DL_QMI]` `[WAN_DL_NOTIF]` | step-by-step progress of the in-kernel IPACM emulation |
+| `[IRQ_STTS_DIAG]` `[BAM_DIAG]` | raw HW state — the BAM_DIAG wake-test answers "is the BAM clocked/powered at all?" on a new board |
 
-### Tier 3 — Always-on sondy (no gate, bounded rate)
-
-A small set of probes don't gate at all because they fire at most
-once per rare event:
-
-- `[QMI_FILTER_INSTALL_SONDA]` (`ipa_qmi_service.c`) — fires when the
-  modem requests an HW filter rule install. Once per attach + a
-  handful during RAT transitions.
-- `[RUNTIME_SONDA]` (`rmnet_ipa.c`) — periodic delayed-work,
-  10 s interval. Prints RX/TX counter deltas + active q6 rule count.
-  Cheap, used as a steady-state heartbeat.
-- `[SONDA_MASTER_TX]`, `[SONDA_MASTER_QMI]` — `pr_err` diagnostic
-  one-shots called from filter/QMI install paths.
-
-These intentionally avoid the gating to be impossible to forget in
-the field; the rate ceiling keeps them harmless.
-
-### Why three tiers and not one toggle
-
-A single global gate would have made bringup either useless (everything
-behind a default-off flag — porter has to know which sonda exists to
-even turn it on) or unusable (everything on by default — boot logs
-swamped, throughput cratered). The split reflects what we actually
-hit during 156 h of porting:
-
-1. Tier 1 — what you want from the second the driver probes. Rare,
-   semantic-state-change events. Default ON; readable via ftrace.
-2. Tier 2 — what you only want when chasing a specific datapath bug.
-   Per-packet; default OFF; sysfs toggleable for short windows.
-3. Tier 3 — operational liveness signals + filter-install accounting
-   that you *always* want, even in production. Rate-bounded so no gate
-   needed.
-
-### Quick reference
-
-| Where logged | Default | Toggle |
-|---|---|---|
-| ftrace trace_pipe | ON | symbol `ipa_rev_eng_active` (rebuild) |
-| dmesg | OFF | `/sys/module/ipa/parameters/ipa_sonda_dbg` |
-| dmesg | ON (rate-bounded) | none |
-
-For upstream submission these would all be replaced by tracepoints
-or removed; they exist in the current tree as the artefact of an
-empirical bringup, not as production diagnostics.
+Not carried over (originals preserved in the project's history
+archive): the per-packet SPS/NAPI/RX-sequence sondas tied to a
+pre-cleanup tree state — rewrite those via `IPA_SONDA_DBG()` as needed
+— and the init-time SRAM zero-table hexdumps (the commit-time
+`[DUMP_RT_*]` probes answer the same question with live content).
 
 ---
 
@@ -813,20 +810,36 @@ returns `-ENOTSUPP` or no-ops as appropriate. The build still links
 clean and the rest of the kernel can use IPA exports without
 discovering missing symbols.
 
-### 3. `ipa_rm.c` + 5 `ipa_rm_*` files (~3 200 LoC)
+### 3. `ipa_rm.c` + 5 `ipa_rm_*` files (~3 200 LoC) — compiled and wired
 
-Vendor's **IPA Resource Manager** tracks producer/consumer
-dependencies between IPA endpoints (e.g. WLAN producer ↔ A2 consumer)
-and arbitrates power/clock state across them. SDM660 v2.6L modem
-does not enforce RM votes — it manages its own side of the link — so
-we ship the enum (`IPA_RM_RESOURCE_*`) for ABI compatibility but
-nothing implements the actual RM logic. Stubs in
-`ipa_disabled_stubs.c` accept the API calls and return success.
+> **Correction (power-save work, 2026-06).** An earlier revision of this
+> note claimed the IPA Resource Manager was stubbed in
+> `ipa_disabled_stubs.c`. That is **not** true. All five `ipa_rm*.o` are
+> compiled into `ipa-driver.ko` (parent `Makefile`) and the graph is wired
+> at runtime: `q6_initialize_rm()` creates `Q6_PROD`/`Q6_CONS` (perf
+> profile 100 Mbps), `ipa_create_apps_resource()` creates `APPS_CONS`, and
+> the rmnet TX path requests `WWAN_0_PROD` via the inactivity timer.
+> `ipa_rm.c` aggregates the per-resource perf profiles and calls
+> `ipa2_set_required_perf_profile()`. `ipa_disabled_stubs.c` stubs only the
+> offload engines (WDI / NTN / MHI / teth-bridge) — no `ipa_rm_*` symbols.
 
-If you later need WLAN/USB offload through IPA, this is where you
-start — porting it requires the dependency-graph traversal logic in
-`ipa_rm_dependency_graph.c` and the reference-counted resource
-machinery in `ipa_rm_resource.c`.
+Vendor's **IPA Resource Manager** tracks producer/consumer dependencies
+between IPA endpoints and arbitrates power/clock state across them. In this
+port it is functional but was **clock-inert**: the base port set
+`enable_clock_scaling = 0`, so `ipa2_set_required_perf_profile()` always
+returned NOMINAL (150 MHz) and the RM bandwidth votes never moved the core
+clock. (The SDM660 v2.6L modem manages its own side of the link, so
+*modem-facing* RM enforcement is irrelevant — but the *AP-side* RM votes
+that scale the local IPA core clock are real.)
+
+`patches/sdm660-ipa-port-6.19-powersave.patch` re-couples the RM graph to
+the core clock — `enable_clock_scaling = 1` plus a threshold retune for the
+cellular ~100 Mbps vote. See **Power-save: dynamic IPA clock scaling**
+below.
+
+If you later need WLAN/USB offload through IPA, the dependency-graph
+traversal in `ipa_rm_dependency_graph.c` and the reference-counted resource
+machinery in `ipa_rm_resource.c` are already in tree to build on.
 
 ### 4. NAT userspace management
 
@@ -885,7 +898,7 @@ Why we don't need it on our target:
 
 | IPACM responsibility | Why we get away without it |
 |---|---|
-| (1) Datapath setup | Three ioctls — `SET_EGRESS=0x06`, `SET_INGRESS=0x3e`, `ADD_MUX mux=1` — done **once** by either `trace/ipacm_min.c` or the in-kernel **`vendor_auto_ipacm_init_fn`** hook at `rmnet_ipa.c:3886`, fired automatically off `ipa_q6_handshake_complete()` with a 3 s delay. After that, the datapath stays up indefinitely. |
+| (1) Datapath setup | Three ioctls — `SET_EGRESS=0x06`, `SET_INGRESS=0x3e`, `ADD_MUX mux=1` — done **once** by the in-kernel **`vendor_auto_ipacm_init_fn`** hook (`vendor_auto_ipacm_init_fn()` in `rmnet_ipa.c`), fired automatically off `ipa_q6_handshake_complete()` with a 3 s delay. After that, the datapath stays up indefinitely. |
 | (2) Filter rules | v2.6L modem installs its own filter rules via the `qcom,modem-cfg-emb-pipe-flt` DT property — AP-side filter install is a no-op. |
 | (3) NAT timestamp refresh | Userspace `ping -i 5 $gw` keepalive as documented above. Not pretty but functional. |
 | (4) Netlink-driven dynamic rules | Single static bearer; no dynamic events to react to. |
@@ -1011,7 +1024,7 @@ The 20.5 Mbps DL throughput unlock depends on the rmnet
 `rmnet_ipa0` port. With QMAPv3 DL each packet has an 8-byte trailer
 that the rmnet upstream code only strips when this flag is on. In
 the `vendor-init` path our `post_tune` stage sets this flag before
-traffic flows (see `trace/vendor-init/stage_post_tune.c:124-139`).
+traffic flows (see `vendor-init/stage_post_tune.c`).
 
 Under MM-driven activation MM creates `qmapmux0.0` itself with the
 vendor-Android-style defaults — which **do not** set
@@ -1156,8 +1169,8 @@ from two complementary sources:
 
 1. **Live capture** of QMI traffic on Asus Lineage 22 firmware via
    `LD_PRELOAD` hook of `qcrild`, `netmgrd`, `ipacm`. About 14 794
-   QMI events captured across a real bearer activation. Tooling is
-   in `trace/android_capture/`.
+   QMI events captured across a real bearer activation. (The capture
+   tooling lives in the project's working tree, not in this package.)
 
 2. **Static analysis** of the pulled Lineage `/vendor/lib64/libril-qc-hal-qmi.so`
    (32 MB). The library is stripped but debug log strings are
@@ -1177,10 +1190,8 @@ parity is the remaining open question (see Caveats).
 ## File layout
 
 ```
-trace/vendor-init/
+vendor-init/
 ├── Makefile
-├── POSTMARKETOS_X00TD_CELLULAR.md         ← this document
-├── sdm660-ipa-port-4.19-to-6.19.patch     ← full kernel porting patch
 ├── vendor-init.{c,h}                — main / stage dispatcher
 ├── qrtr.{c,h}                       — AF_QIPCRTR helpers
 ├── qmi.{c,h}                        — TLV encode/decode
@@ -1197,12 +1208,17 @@ trace/vendor-init/
 ├── stage_iattach.c                  — alternate iattach (unused in production)
 └── stage_post_tune.c                — rmnet/MTU/sysctl/ethtool
 
-drivers/platform/msm/ipa/ipa_v2/      — kernel: IPA driver port (+ stubs/shims)
-drivers/platform/msm/sps/             — kernel: BAM/SPS framework port
-drivers/net/ethernet/qualcomm/rmnet/  — kernel: rmnet feature patch
+vendor-baseline-4.19/                 — pristine vendor 4.19 sources
+port/                                 — the port pipeline (scripts + files/)
+patches/*powersave*                   — optional dynamic-clock-scaling extras
+
+In the resulting kernel tree:
+drivers/platform/msm/ipa/ipa_v2/      — IPA driver port (+ stubs/shims)
+drivers/platform/msm/sps/             — BAM/SPS framework port
+drivers/net/ethernet/qualcomm/rmnet/  — upstream rmnet + feature-flag edit
 include/linux/{msm-bus,msm-bus-board,ipc_logging,msm_gsi,
-                 ipa_wdi3,msm-sps,ipa,if_rmnet}.h  — port-specific shim headers
-include/uapi/linux/msm_ipa.h          — UAPI tweak
+                 ipa_wdi3,ipa_wigig,msm-sps,ipa,…}.h — shim/vendor headers
+include/{net,soc/qcom,uapi/linux}/…   — stub + vendor UAPI headers
 ```
 
 ---

@@ -1,0 +1,104 @@
+================================================================
+ IPA core-clock power-save — register DT overlay as a .dtbo target
+================================================================
+
+ Opt-in. Builds the power-save IPA clock overlay into the kernel tree:
+
+   1. drops arch/arm64/boot/dts/qcom/sdm636-asus-x00td-ipa-powersave.dtso
+      (identical to dts/sdm636-asus-x00td-ipa-powersave.dtso in this pkg);
+   2. registers it as a .dtbo target in the qcom dtb Makefile.
+
+ The Makefile entry is anchored on the SPDX line (present and identical in
+ every kernel Makefile) and added at the top — dtb-y is order-independent,
+ so position does not matter. Build product: a standalone
+ sdm636-asus-x00td-ipa-powersave.dtbo.
+
+ Apply on top of the base port + power-save driver patch:
+   patch -p1 < patches/sdm660-ipa-port-6.19-powersave.patch
+   patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch
+
+ To APPLY the overlay at runtime the BASE board .dtb must carry symbols;
+ build it with DTC overlay flags, e.g. add to the same Makefile:
+   DTC_FLAGS_sdm636-asus-x00td += -@
+
+ Use this dtbo OR patches/sdm636-asus-x00td-ipa-powersave-dts.patch, not
+ both — they make the same change two ways.
+
+ Generated: 2026-06-04
+================================================================
+
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sdm636-asus-x00td-ipa-powersave.dtso
+@@ -0,0 +1,65 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * IPA core-clock power-save overlay — Asus Zenfone Max Pro M1 (X00TD / SDM636)
++ *
++ * Apply together with the power-save driver patch:
++ *     patches/sdm660-ipa-port-6.19-powersave.patch
++ *
++ * WHY
++ *   The base board DTS (arch/arm64/boot/dts/qcom/sdm636-asus-x00td.dts)
++ *   pins the IPA core clock at 200 MHz:
++ *
++ *       assigned-clocks      = <&rpmcc RPM_SMD_IPA_CLK>;
++ *       assigned-clock-rates = <200000000>;
++ *
++ *   That pin existed only because the stock port disabled the driver's
++ *   dynamic clock scaling (enable_clock_scaling = 0), so the rate had to
++ *   come from DT. With the power-save patch the driver owns the rate: it
++ *   boots at TURBO (200 MHz) for the Q6 handshake and then scales the IPA
++ *   core_clk SVS(75) / NOMINAL(150) / TURBO(200) MHz from the ipa_rm
++ *   resource-manager bandwidth votes. Leaving the static pin in place keeps
++ *   RPM's assigned-rate asserted at probe and is misleading, so this overlay
++ *   drops it and lets the clock fall to SVS when the link is idle.
++ *
++ * WHAT
++ *   Only the assigned-clock* pin is removed. The clock and interconnect
++ *   bindings are inherited unchanged from the base &ipa node (reproduced in
++ *   the comment below for reference). Nothing else changes.
++ *
++ * APPLY (build-time, kernel must be built with DTC overlay symbols, i.e.
++ * the board .dtb compiled with -@ / CONFIG_OF_OVERLAY):
++ *     - add this file to arch/arm64/boot/dts/qcom/Makefile as a .dtbo, or
++ *     - fdtoverlay the resulting .dtbo onto the board .dtb at package time.
++ *   If your boot chain cannot apply overlays, instead delete the two
++ *   assigned-clock* lines directly from sdm636-asus-x00td.dts (see the
++ *   reference block below).
++ */
++
++/dts-v1/;
++/plugin/;
++
++&ipa {
++	/*
++	 * Reference — these stay exactly as in the base node, do NOT re-add
++	 * them here (they are inherited); shown only so the full clock /
++	 * interconnect picture lives in one place:
++	 *
++	 *   clocks = <&rpmcc RPM_SMD_IPA_CLK>,
++	 *            <&rpmcc RPM_SMD_AGGR2_NOC_CLK>;
++	 *   clock-names = "core_clk", "smmu_clk";
++	 *
++	 *   interconnects =
++	 *       <&a2noc MASTER_IPA       &bimc SLAVE_EBI>,    // "ipa-mem"
++	 *       <&a2noc MASTER_IPA       &snoc SLAVE_IMEM>,   // "ipa-imem"
++	 *       <&gnoc MASTER_APSS_PROC  &snoc SLAVE_IPA>;    // "cpu-cfg"
++	 *   interconnect-names = "ipa-mem", "ipa-imem", "cpu-cfg";
++	 *
++	 * Bandwidth voting flows through these interconnect paths via
++	 * drivers/platform/msm/ipa/ipa_v2/msm_bus_compat.c (icc_set_bw), driven
++	 * by the same ipa_rm votes that now also scale the core clock.
++	 */
++
++	/* Power-save: hand the IPA core_clk rate to the driver's scaling engine. */
++	/delete-property/ assigned-clock-rates;
++	/delete-property/ assigned-clocks;
++};
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -1,2 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0
++# IPA core-clock power-save overlay (opt-in) — see sdm660-ipa-port-6.19-powersave.patch
++dtb-$(CONFIG_ARCH_QCOM) += sdm636-asus-x00td-ipa-powersave.dtbo
+ dtb-$(CONFIG_ARCH_QCOM)	+= apq8016-sbc.dtb

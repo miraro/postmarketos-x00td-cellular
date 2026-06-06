@@ -1,0 +1,44 @@
+================================================================
+ IPA core-clock power-save — board DTS variant (Asus X00TD)
+================================================================
+
+ Same effect as dts/sdm636-asus-x00td-ipa-powersave.dtso, but as a direct
+ patch to the board DTS — for boot chains that cannot apply DT overlays.
+
+ Drops the static 200 MHz IPA core_clk pin (assigned-clocks /
+ assigned-clock-rates) so the driver's dynamic clock scaling owns the rate.
+ Pairs with patches/sdm660-ipa-port-6.19-powersave.patch — apply that one
+ first (it enables enable_clock_scaling and retunes the bandwidth
+ thresholds). With only this DTS change and the stock driver the IPA clock
+ would fall to the RPM boot default (~75 MHz); do not apply it alone.
+
+ APPLY (in your 6.19 kernel tree, after the 4.19 baseline overlay that
+ provides this DTS):
+   patch -p1 < patches/sdm660-ipa-port-6.19-powersave.patch
+   patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dts.patch
+
+ Clocks and interconnects are untouched; only the assigned-clock* pin goes.
+
+ Generated: 2026-06-04
+================================================================
+
+--- a/arch/arm64/boot/dts/qcom/sdm636-asus-x00td.dts
++++ b/arch/arm64/boot/dts/qcom/sdm636-asus-x00td.dts
+@@ -732,9 +732,14 @@
+ 			 <&rpmcc RPM_SMD_AGGR2_NOC_CLK>;
+ 		clock-names = "core_clk", "smmu_clk";
+ 
+-        /* Force RPM clock vote at probe time regardless of driver bugs */
+-        assigned-clocks = <&rpmcc RPM_SMD_IPA_CLK>;
+-        assigned-clock-rates = <200000000>;       /* 200 MHz turbo */
++		/* Power-save: the IPA core_clk rate is owned by the driver's
++		 * dynamic clock scaling — see sdm660-ipa-port-6.19-powersave.patch.
++		 * No static assigned-clock* pin: the clock gates off when idle and
++		 * scales SVS(75)/NOMINAL(150)/TURBO(200) MHz under the ipa_rm votes.
++		 * If you did NOT apply that patch, keep the vendor pin instead:
++		 *     assigned-clocks      = <&rpmcc RPM_SMD_IPA_CLK>;
++		 *     assigned-clock-rates = <200000000>;
++		 */
+ 
+ 		/* SMMU stream IDs for the IPA core itself */
+ 		iommus = <&anoc2_smmu 0x19C0>,

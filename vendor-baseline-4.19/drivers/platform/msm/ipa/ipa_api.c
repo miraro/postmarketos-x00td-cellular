@@ -3724,12 +3724,9 @@ bool ipa_get_lan_rx_napi(void)
 {
 	bool ret;
 
-	if (ipa_api_hw_type == 6)
-		return false;
-	else {
-		IPA_API_DISPATCH_RETURN_BOOL(ipa_get_lan_rx_napi);
-		return ret;
-	}
+	IPA_API_DISPATCH_RETURN_BOOL(ipa_get_lan_rx_napi);
+
+	return ret;
 }
 EXPORT_SYMBOL(ipa_get_lan_rx_napi);
 

@@ -1,0 +1,108 @@
+================================================================
+ IPA v2.6L — power-save: dynamic clock scaling + ipa_rm graph
+================================================================
+
+ Incremental patch. Apply ON TOP OF the 6.19 IPA port:
+
+   patch -p1 < patches/sdm660-ipa-port-4.19-to-6.19.nosondy.patch
+   patch -p1 < patches/sdm660-ipa-port-6.19-powersave.patch   # <-- this
+
+ WHAT IT DOES
+   Re-enables the IPA core-clock dynamic scaling that the base port
+   pinned off (ipa_ctx->enable_clock_scaling = 0), and couples it to the
+   IPA Resource Manager (ipa_rm) graph.
+
+   Finding vs POSTMARKETOS_X00TD_CELLULAR.md §3: ipa_rm is NOT stubbed —
+   all five ipa_rm*.o are compiled (parent Makefile) and the graph is
+   wired at runtime (q6_initialize_rm Q6_PROD/CONS, ipa_create_apps_resource
+   APPS_CONS, rmnet TX -> WWAN_0_PROD). ipa_rm.c already calls
+   ipa2_set_required_perf_profile(); it was inert only because
+   enable_clock_scaling was 0 (so the engine always returned NOMINAL).
+
+   So this patch is a single localised change in ipa_v2/ipa.c:
+     1. enable_clock_scaling = 1   -> RM votes now move the clock.
+     2. Lower the v2.0 bandwidth thresholds (nominal 600->50, turbo
+        1000->150 Mbps). The vendor values target gigabit WLAN offload;
+        the cellular RM profile only votes ~100 Mbps, so with the stock
+        thresholds scaling would pin SVS=75 MHz even under load (the
+        original reason it was disabled). Retuned so ~100 Mbps active ->
+        NOMINAL (150 MHz, the proven 20.5 Mbps DL rate), idle -> SVS=75,
+        >150 Mbps bursts -> TURBO=200.
+     3. Boot stays at TURBO (curr_ipa_clk_rate unchanged) for the Q6
+        handshake.
+
+ RESULTING BEHAVIOUR
+   - fully idle:        clock gated off    (active-clients refcount, already)
+   - active data:       NOMINAL 150 MHz    (RM ~100 Mbps vote)
+   - active, unvoted:   SVS 75 MHz         (new idle-ish saving)
+   - >150 Mbps burst:   TURBO 200 MHz
+
+ CAVEATS / TUNING
+   - Throughput-proportional scaling needs IPACM/QMI to update the RM perf
+     profiles at runtime. With the static 100 Mbps profile the scaling is
+     coarse (idle-gated vs active-NOMINAL), not finely load-following.
+   - For idle savings to show on the power rail, also drop the board DTS
+     "assigned-clock-rates = <200000000>" pin so the driver owns the rate.
+   - NOT hardware-tested. Verify DL/UL throughput is unchanged after
+     applying; if SVS proves too slow for your link, raise
+     clock_scaling_bw_threshold_nominal, or bias to TURBO by lowering
+     clock_scaling_bw_threshold_turbo.
+
+ Generated: 2026-06-04
+================================================================
+
+--- a/drivers/platform/msm/ipa/ipa_v2/ipa.c
++++ b/drivers/platform/msm/ipa/ipa_v2/ipa.c
+@@ -3974,19 +3974,42 @@ static int ipa_init(const struct ipa_plat_drv_res *resource_p,
+ 	if (result)
+ 		goto fail_clk;
+ 
+-	/* Mainline tuning: disable dynamic clock scaling.
++	/* Power-save: re-enable dynamic IPA core-clock scaling and let the
++	 * IPA Resource Manager graph drive it.
+ 	 *
+-	 * Vendor enables scaling which picks IPA core_clk rate (75/150/200 MHz)
+-	 * from current bandwidth_mbps. At our LTE baseline ~0.5 Mbps, every
+-	 * threshold check falls through to SVS = 75 MHz — the slowest setting,
+-	 * which halves processing capacity for no reason.
++	 * The ipa_rm* objects are compiled in and already wired:
++	 *   - q6_initialize_rm()        creates Q6_PROD / Q6_CONS (perf 100 Mbps)
++	 *   - ipa_create_apps_resource() creates APPS_CONS
++	 *   - rmnet TX path requests WWAN_0_PROD via the inactivity timer
++	 * ipa_rm aggregates the per-resource perf profiles and calls
++	 * ipa2_set_required_perf_profile() (see ipa_rm.c). That call only moves
++	 * the clock when enable_clock_scaling is set; with it cleared the engine
++	 * pinned NOMINAL (150 MHz) and the RM votes were inert. Re-enabling it
++	 * couples the RM graph to the core clock: gated off when idle (active-
++	 * clients refcount), SVS (75 MHz) when active-but-unvoted, NOMINAL/TURBO
++	 * under the RM bandwidth vote.
+ 	 *
+-	 * With scaling disabled, ipa2_set_clock_plan_from_pm() lands in the
+-	 * else-branch that pins needed_voltage = IPA_VOLTAGE_NOMINAL (150 MHz).
+-	 * curr_ipa_clk_rate is still initialised to TURBO here, so init paths
+-	 * see full bandwidth before NOMINAL takes over.
++	 * Threshold retune. The vendor v2.0 thresholds (nominal 600 / turbo
++	 * 1000 Mbps) target gigabit WLAN-offload. The cellular RM perf profile
++	 * only votes ~100 Mbps, so with the stock thresholds every check still
++	 * fell through to SVS = 75 MHz even under data load — which is exactly
++	 * why scaling was originally disabled. Lower them so the ~100 Mbps active
++	 * vote lands on NOMINAL (the proven-good 20.5 Mbps DL rate), leaving SVS
++	 * for idle and TURBO for >150 Mbps bursts. Tune for a throughput bias
++	 * (lower turbo) or deeper idle saving (raise nominal).
++	 *
++	 * curr_ipa_clk_rate stays initialised to TURBO so the boot / Q6 handshake
++	 * runs at full clock before the RM-driven profile takes over.
++	 *
++	 * NOTE: throughput-proportional scaling needs IPACM/QMI to update the RM
++	 * perf profiles at runtime; with the static 100 Mbps profile the scaling
++	 * is coarse (idle-gated vs active-NOMINAL). For idle savings to show on
++	 * the rail, also drop the board DTS "assigned-clock-rates = <200000000>"
++	 * pin so the driver — not RPM — owns the rate.
+ 	 */
+-	ipa_ctx->enable_clock_scaling = 0;
++	ipa_ctx->enable_clock_scaling = 1;
++	ipa_ctx->ctrl->clock_scaling_bw_threshold_nominal = 50;
++	ipa_ctx->ctrl->clock_scaling_bw_threshold_turbo = 150;
+ 	ipa_ctx->curr_ipa_clk_rate = ipa_ctx->ctrl->ipa_clk_rate_turbo;
+ 
+ 	/* enable IPA clocks explicitly to allow the initialization */

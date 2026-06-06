@@ -418,7 +418,7 @@
 			regulator-min-microvolt = <1200000>;
 			regulator-max-microvolt = <1200000>;
 			regulator-enable-ramp-delay = <250>;
-            regulator-always-on;
+			regulator-always-on;
 		};
 
 		vreg_l8a_1p8: l8 {
@@ -751,7 +751,7 @@
 
 		modem-remoteproc = <&remoteproc_mss>;
 
-		status = "okay";	/* Phase 4g: hybrid takes over */
+		status = "okay";
 
 		/* Children: SMMU context banks parsed by ipa_smmu_*_cb_probe() */
 		qcom,ipa-smmu-ap-cb {
@@ -772,174 +772,6 @@
 			qcom,iova-mapping = <0x20000000 0x40000000>;
 		};
 	};
-
-	/* Hybrid IPA driver — mainline drivers/net/ipa/ structure layered
-	 * over the SPS/BAM backend ported from the 4.19 vendor source.
-	 *
-	 * Disabled by default. To test the hybrid driver, flip the
-	 * status on three nodes:
-	 *   1. Vendor "ipa: ipa@14780000" above      → "disabled"
-	 *   2. This node "ipa_hybrid: ipa-hybrid..." → "okay"
-	 *   3. Vendor "rmnet_ipa" below              → "disabled"
-	 * Then build with CONFIG_QCOM_IPA_V2_HYBRID=m and the
-	 * corresponding CONFIG_QCOM_IPA_V2 (vendor) unset.
-	 *
-	 * The hybrid driver creates its rmnet netdev internally via
-	 * mainline ipa_modem.c — no separate rmnet_ipa DT node needed.
-	 *
-	 * Note on reg-names: mainline expects three named MMIO regions
-	 * ("ipa-reg", "ipa-shared", "bam-base") whereas the vendor port
-	 * exposes only two ("ipa-base", "bam-base").
-	 *
-	 * Vendor maps a single "ipa-base" 0x14780000 / 0x4effc covering the
-	 * whole IPA wrapper, then internally does mmio = ioremap(base +
-	 * IPA_REG_BASE_OFST_v2_5, ...) = 0x147c0000. All vendor IPA_*_OFST
-	 * register offsets are relative to that 0x147c0000 base.
-	 *
-	 * The mainline-style "ipa-reg" region must therefore sit at the
-	 * register-block base (0x147c0000), not at the wrapper start. SRAM
-	 * lives inside the wrapper at 0x14785000 (vendor IPA_SRAM_SW_FIRST
-	 * = 0x5000 from wrapper) and BAM at 0x14784000.
-	 *
-	 * Pre-Phase-3a a faulty <0x14780000 0x5000> mapping caused every
-	 * placeholder-reg write to land in the wrapper instead of the
-	 * register block, hitting a reset/control register and hard-
-	 * powering off the SoC. See Phase 4g fix #13.
-	 */
-	ipa_hybrid: ipa-hybrid@147c0000 {
-		compatible = "qcom,sdm636-ipa-hybrid";
-		status = "disabled";	/* Phase 4g: first boot test */
-
-		reg = <0x147c0000 0xf000>,
-		      <0x14785000 0x4000>,
-		      <0x14784000 0x3C000>;
-		reg-names = "ipa-reg", "ipa-shared", "bam-base";
-
-		/* "ipa-shared" size: v2.6L SRAM partition layout (see
-		 * include/ipa_ram_mmap.h IPA_MEM_v2_6L_RAM_END_OFST) ends
-		 * at 0x1df8 ≈ 7.5 KB. We map 16 KB (0x4000) to allow head-
-		 * room and match common v2.x SoC SRAM sizes. The first
-		 * earlier 4 KB sizing caused ipa_mem_size_valid() to reject
-		 * IPA_MEM_MODEM (size 6376) as ending beyond the limit.
-		 */
-
-		interrupts = <GIC_SPI 333 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>;
-		interrupt-names = "ipa", "bam";
-
-		/* Mainline IPA expects four interrupt-names ("ipa-setup-ready",
-		 * "ipa-clock-query") and a "ipa-clock-enabled*" smem-state pair
-		 * to handle modem readiness signaling. X00TD modem firmware
-		 * doesn't speak that protocol (it predates SDM845's mainline
-		 * IPA conventions). Sharing the standard "ready" bit
-		 * (modem_smp2p_in 1) with remoteproc_mss fails IRQ-flag
-		 * compatibility — q6v5 ready is requested IRQF_ONESHOT,
-		 * ipa-setup-ready is not, and neither asks for IRQF_SHARED.
-		 *
-		 * Instead of fighting that, we leave SMP2P wiring out and let
-		 * ipa_smp2p_init() soft-fail (fix #12). ipa_modem.c hooks the
-		 * QCOM_SSR_AFTER_POWERUP event from the existing mpss SSR
-		 * notifier to trigger ipa_setup() — same effective lifecycle
-		 * signal as ipa-setup-ready, no IRQ contention.
-		 */
-
-		clocks = <&rpmcc RPM_SMD_IPA_CLK>;
-		clock-names = "core";
-
-		iommus = <&anoc2_smmu 0x19C0>,
-			 <&anoc2_smmu 0x19C2>;
-
-		interconnects = <&a2noc MASTER_IPA &bimc SLAVE_EBI>,
-				<&a2noc MASTER_IPA &snoc SLAVE_IMEM>,
-				<&gnoc MASTER_APSS_PROC &snoc SLAVE_IPA>;
-		interconnect-names = "ipa-mem", "ipa-imem", "cpu-cfg";
-
-		modem-remoteproc = <&remoteproc_mss>;
-		modem-init;
-	};
-
-	/* Mainline-style clean-room IPA v2.6L driver — drivers/net/ipa_v2_6L/
-	 *
-	 * Built fresh in 2026-05-22 based on:
-	 *   - vendor 4.19 register sequences (trace/*.log sondas)
-	 *   - ipa2-lite BAM access pattern (proven 2G cellular DL)
-	 *   - mainline ipa.ko file-structure conventions
-	 *
-	 * Coexists with the legacy "ipa_hybrid" node — only one of the
-	 * three IPA nodes (ipa, ipa_hybrid, ipa_v2_6L) can be status="okay"
-	 * at a time because they share the same hardware MMIO region.
-	 *
-	 * To test ipa_v2_6L on X00TD:
-	 *   1. ipa_hybrid status = "disabled"
-	 *   2. ipa_v2_6L  status = "okay"
-	 *   3. rmnet_ipa  status = "disabled"
-	 *   4. CONFIG_IPA_V2_6L=m (or =y) in kernel config
-	 *
-	 * Identical reg/IRQ map to ipa_hybrid above — same SoC, same HW.
-	 * Different reg-names: we use "bam-base" instead of "bam-reg" for
-	 * convention parity with hybrid.
-	 */
-	ipa_v2_6L: ipa-v2-6L@147c0000 {
-		compatible = "qcom,sdm636-ipa-v2.6L";
-		status = "disabled";	/* enable to switch from hybrid */
-
-		/* SRAM DIRECT_ACCESS lives at:
-		 *   wrapper(0x14780000) + IPA_REG_BASE(0x40000) +
-		 *   IPA_SRAM_DIRECT_ACCESS_N_OFST_v2_0(0)(0x5000)
-		 *   = 0x147c5000
-		 *
-		 * Hybrid's DTS uses 0x14785000 = wrapper + 0x5000, which is
-		 * actually inside BAM register space (BAM_REVISION area at
-		 * BAM_REG(0x1000) = 0x14784000+0x1000 = 0x14785000). Hybrid
-		 * works despite this because mainline ipa.ko reads SRAM only
-		 * via IPA_CMD_DMA_SHARED_MEM (reverse direction), never
-		 * through the direct-access MMIO window.
-		 *
-		 * Our driver does ioread32 from the SRAM window for debugfs
-		 * dumps, so we need the correct physical address. Verified
-		 * via vendor 4.19 ipa_v2/ipa_reg.h:
-		 *   IPA_REG_BASE_OFST_v2_5         = 0x00040000
-		 *   IPA_SRAM_DIRECT_ACCESS_N_OFST_v2_0(0) = 0x00005000
-		 *
-		 * 0x147c5000+0x4000 falls inside ipa-reg's 0x147c0000+0xf000
-		 * range. The overlap is handled by devm_ioremap() (no resource
-		 * reservation) — they are two functional views of the same
-		 * MMIO area.
-		 */
-		reg = <0x147c0000 0xf000>,
-		      <0x14784000 0x3C000>,
-		      <0x147c5000 0x4000>;
-		reg-names = "ipa-reg", "bam-base", "ipa-shared";
-
-		interrupts = <GIC_SPI 333 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>;
-		interrupt-names = "ipa", "bam";
-
-		clocks = <&rpmcc RPM_SMD_IPA_CLK>;
-		clock-names = "core";
-
-		iommus = <&anoc2_smmu 0x19C0>,
-			 <&anoc2_smmu 0x19C2>;
-
-		interconnects = <&a2noc MASTER_IPA &bimc SLAVE_EBI>,
-				<&a2noc MASTER_IPA &snoc SLAVE_IMEM>,
-				<&gnoc MASTER_APSS_PROC &snoc SLAVE_IPA>;
-		interconnect-names = "ipa-mem", "ipa-imem", "cpu-cfg";
-
-		modem-remoteproc = <&remoteproc_mss>;
-	};
-
-	/* RMNET netdev driver — used ONLY by the vendor 4.19 IPA port.
-	 *
-	 * drivers/platform/msm/ipa/ipa_v2/rmnet_ipa.c is a separate
-	 * platform driver matching "qcom,rmnet-ipa" that builds the
-	 * rmnet_ipa0 netdev. The mainline-style hybrid driver instead
-	 * creates the same netdev internally from ipa_modem.c during
-	 * its main IPA probe; for hybrid testing this node should be
-	 * status = "disabled".
-	 *
-	 * Required ON when the vendor IPA node (ipa@14780000) is active.
-	 */
 	rmnet_ipa {
 		compatible = "qcom,rmnet-ipa";
 		/* __rmnet_ipa_dt_patch__ - properties from 4.19 vendor analysis */
@@ -948,6 +780,6 @@
 		qcom,ipa-advertise-sg-support;  /* scatter-gather support */
 		qcom,ipa-napi-enable;           /* enable NAPI on pipe 5 (RX) */
 		qcom,wan-rx-desc-size = <1024>;
-		status = "okay";	/* Phase 4g: hybrid handles rmnet internally */
+		status = "okay";
 	};
 };

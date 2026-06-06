@@ -304,7 +304,7 @@ int ipa_send_one(struct ipa_sys_context *sys, struct ipa_desc *desc,
 		mem_flag = GFP_KERNEL;
 
 	tx_pkt = kmem_cache_zalloc(ipa_ctx->tx_pkt_wrapper_cache, mem_flag);
-	if (unlikely(!tx_pkt)) {
+	if (!tx_pkt) {
 		IPAERR("failed to alloc tx wrapper\n");
 		goto fail_mem_alloc;
 	}
@@ -872,9 +872,7 @@ static void ipa_rx_switch_to_intr_mode(struct ipa_sys_context *sys)
 	atomic_set(&sys->curr_polling_state, 0);
 	if (!sys->ep->napi_enabled)
 		ipa_handle_rx_core(sys, true, false);
-#ifndef CONFIG_DISABLE_IPA_WAKELOCKS
 	ipa_dec_release_wakelock(sys->ep->wakelock_client);
-#endif
 	return;
 
 fail:
@@ -950,7 +948,7 @@ void ipa_sps_irq_control_all(bool enable)
 			continue;
 
 		ipa_ep_idx = ipa_get_ep_mapping(client_num);
-		if (unlikely(ipa_ep_idx == -1)) {
+		if (ipa_ep_idx == -1) {
 			IPADBG_LOW("Invalid client.\n");
 			continue;
 		}
@@ -1007,9 +1005,7 @@ static void ipa_sps_irq_rx_notify(struct sps_event_notify *notify)
 			IPAERR("sps_set_config() failed %d\n", ret);
 			break;
 		}
-#ifndef CONFIG_DISABLE_IPA_WAKELOCKS
 		ipa_inc_acquire_wakelock(sys->ep->wakelock_client);
-#endif
 		atomic_set(&sys->curr_polling_state, 1);
 		trace_intr_to_poll(sys->ep->client);
 		queue_work(sys->wq, &sys->work);
@@ -1219,7 +1215,7 @@ int ipa2_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 	}
 
 	ipa_ep_idx = ipa2_get_ep_mapping(sys_in->client);
-	if (unlikely(ipa_ep_idx == -1)) {
+	if (ipa_ep_idx == -1) {
 		IPAERR("Invalid client.\n");
 		goto fail_gen;
 	}
@@ -1658,7 +1654,7 @@ int ipa2_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 		return -EINVAL;
 	}
 
-	if (unlikely(skb->len == 0)) {
+	if (skb->len == 0) {
 		IPAERR("packet size is 0\n");
 		return -EINVAL;
 	}
@@ -1670,7 +1666,7 @@ int ipa2_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 		 * 1 desc for each frag
 		 */
 		desc = kzalloc(sizeof(*desc) * (num_frags + 2), GFP_ATOMIC);
-		if (unlikely(!desc)) {
+		if (!desc) {
 			IPAERR("failed to alloc desc array\n");
 			goto fail_mem;
 		}
@@ -1690,7 +1686,7 @@ int ipa2_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 	 */
 	if (IPA_CLIENT_IS_CONS(dst)) {
 		src_ep_idx = ipa2_get_ep_mapping(IPA_CLIENT_APPS_LAN_WAN_PROD);
-		if (unlikely(-1 == src_ep_idx)) {
+		if (-1 == src_ep_idx) {
 			IPAERR("Client %u is not mapped\n",
 				IPA_CLIENT_APPS_LAN_WAN_PROD);
 			goto fail_gen;
@@ -1698,7 +1694,7 @@ int ipa2_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 		dst_ep_idx = ipa2_get_ep_mapping(dst);
 	} else {
 		src_ep_idx = ipa2_get_ep_mapping(dst);
-		if (unlikely(-1 == src_ep_idx)) {
+		if (-1 == src_ep_idx) {
 			IPAERR("Client %u is not mapped\n", dst);
 			goto fail_gen;
 		}
@@ -1758,7 +1754,7 @@ int ipa2_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 			desc[1].callback = NULL;
 		}
 
-		if (unlikely(ipa_send(sys, num_frags + 2, desc, true))) {
+		if (ipa_send(sys, num_frags + 2, desc, true)) {
 			IPAERR("fail to send skb %p num_frags %u SWP\n",
 					skb, num_frags);
 			goto fail_send;
@@ -1779,7 +1775,7 @@ int ipa2_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 		}
 
 		if (num_frags == 0) {
-			if (unlikely(ipa_send_one(sys, desc, true))) {
+			if (ipa_send_one(sys, desc, true)) {
 				IPAERR("fail to send skb %p HWP\n", skb);
 				goto fail_gen;
 			}
@@ -1796,7 +1792,7 @@ int ipa2_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 			desc[1+f-1].user2 = desc[0].user2;
 			desc[0].callback = NULL;
 
-			if (unlikely(ipa_send(sys, num_frags + 1, desc, true))) {
+			if (ipa_send(sys, num_frags + 1, desc, true)) {
 				IPAERR("fail to send skb %p num_frags %u HWP\n",
 						skb, num_frags);
 				goto fail_gen;
@@ -1851,12 +1847,12 @@ static void ipa_wq_repl_rx(struct work_struct *work)
 begin:
 	while (1) {
 		next = (curr + 1) % sys->repl.capacity;
-		if (unlikely(next == atomic_read(&sys->repl.head_idx)))
+		if (next == atomic_read(&sys->repl.head_idx))
 			goto fail_kmem_cache_alloc;
 
 		rx_pkt = kmem_cache_zalloc(ipa_ctx->rx_pkt_wrapper_cache,
 					   flag);
-		if (unlikely(!rx_pkt)) {
+		if (!rx_pkt) {
 			pr_err_ratelimited("%s fail alloc rx wrapper sys=%p\n",
 					__func__, sys);
 			goto fail_kmem_cache_alloc;
@@ -1867,7 +1863,7 @@ begin:
 		rx_pkt->sys = sys;
 
 		rx_pkt->data.skb = sys->get_skb(sys->rx_buff_sz, flag);
-		if (unlikely(rx_pkt->data.skb == NULL)) {
+		if (rx_pkt->data.skb == NULL) {
 			pr_err_ratelimited("%s fail alloc skb sys=%p\n",
 					__func__, sys);
 			goto fail_skb_alloc;
@@ -1876,8 +1872,8 @@ begin:
 		rx_pkt->data.dma_addr = dma_map_single(ipa_ctx->pdev, ptr,
 						     sys->rx_buff_sz,
 						     DMA_FROM_DEVICE);
-		if (unlikely(dma_mapping_error(ipa_ctx->pdev,
-					       rx_pkt->data.dma_addr))) {
+		if (dma_mapping_error(ipa_ctx->pdev,
+				rx_pkt->data.dma_addr)) {
 			pr_err_ratelimited("%s dma map fail %p for %p sys=%p\n",
 			       __func__, (void *)rx_pkt->data.dma_addr,
 			       ptr, sys);
@@ -3564,7 +3560,7 @@ int ipa2_sys_setup(struct ipa_sys_connect_params *sys_in,
 	}
 
 	ipa_ep_idx = ipa2_get_ep_mapping(sys_in->client);
-	if (unlikely(ipa_ep_idx == -1)) {
+	if (ipa_ep_idx == -1) {
 		IPAERR("Invalid client :%d\n", sys_in->client);
 		goto fail_gen;
 	}
