@@ -993,9 +993,11 @@ in `rmnet_ipa.c` (installed by `20-apply-port-fixes.sh`, section
    Without these MM logs *"Unable to read TX and RX endpoint IDs
    from sysfs"*, skips DPM open, falls back to CTL, and the CTL
    path fails MUX_RMNET with the misleading
-   *"Multiplexing required but not supported"*. Our values
-   (`tx=4`, `rx=5`) reflect the SDM660 IPA APPS_LAN_WAN_PROD /
-   APPS_WAN_CONS pipe IDs. The `.dev_groups` member of the
+   *"Multiplexing required but not supported"*. The values are
+   resolved at read time through `ipa2_get_ep_mapping()` (so they
+   stay correct on SoCs with a different endpoint map), with the
+   SDM636/660 v2.6L ids (`tx=4` APPS_LAN_WAN_PROD, `rx=5`
+   APPS_WAN_CONS) as fallback. The `.dev_groups` member of the
    `rmnet_ipa` `platform_driver` wires the sysfs files in
    automatically — no manual sysfs registration needed.
 

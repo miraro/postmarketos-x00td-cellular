@@ -1554,22 +1554,31 @@ read -r -d '' NEW <<'PORT_EOF' || true
  * Mainline IPA 3 + ipa2-lite + ipa_v2_hybrid + new ipa_v2_6L all expose
  * these. Adding them to vendor driver per same convention.
  *
- * Hardcoded values for SDM636 v2.6L (per vendor pipe mapping in
- * drivers/platform/msm/ipa/ipa_v2/ipa_utils.c IPA_CLIENT_APPS_LAN_WAN_PROD
- * = pipe 4, IPA_CLIENT_APPS_WAN_CONS = pipe 5). If you port this to
- * another SoC, replace literals with ipa2_get_ep_mapping() calls.
+ * Pipe ids are resolved at read time through the per-HW-version
+ * endpoint map, so the values stay correct on SoCs with a different
+ * layout (MSM8998, SDM630, ...). Falls back to the SDM636/660 v2.6L
+ * ids (TX=4 APPS_LAN_WAN_PROD, RX=5 APPS_WAN_CONS) in the unlikely
+ * case the lookup is not ready when userspace reads the files.
  */
 static ssize_t tx_endpoint_id_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%u\n", 4);	/* APPS_LAN_WAN_PROD = pipe 4 */
+	int ep = ipa_get_ep_mapping(IPA_CLIENT_APPS_LAN_WAN_PROD);
+
+	if (ep < 0)
+		ep = 4;	/* SDM636/660 v2.6L APPS_LAN_WAN_PROD */
+	return sysfs_emit(buf, "%d\n", ep);
 }
 static DEVICE_ATTR_RO(tx_endpoint_id);
 
 static ssize_t rx_endpoint_id_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%u\n", 5);	/* APPS_WAN_CONS = pipe 5 */
+	int ep = ipa_get_ep_mapping(IPA_CLIENT_APPS_WAN_CONS);
+
+	if (ep < 0)
+		ep = 5;	/* SDM636/660 v2.6L APPS_WAN_CONS */
+	return sysfs_emit(buf, "%d\n", ep);
 }
 static DEVICE_ATTR_RO(rx_endpoint_id);
 
@@ -1679,14 +1688,25 @@ read -r -d '' NEW <<'PORT_EOF' || true
 static ssize_t tx_endpoint_id_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%u\n", 4);	/* APPS_LAN_WAN_PROD pipe id */
+	/* Resolve through the per-HW-version endpoint map so the value
+	 * stays correct on SoCs with a different layout; fall back to
+	 * the SDM636/660 v2.6L pipe id if the core is not up yet. */
+	int ep = ipa2_get_ep_mapping(IPA_CLIENT_APPS_LAN_WAN_PROD);
+
+	if (ep < 0)
+		ep = 4;	/* SDM636/660 v2.6L APPS_LAN_WAN_PROD */
+	return sysfs_emit(buf, "%d\n", ep);
 }
 static DEVICE_ATTR_RO(tx_endpoint_id);
 
 static ssize_t rx_endpoint_id_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%u\n", 5);	/* APPS_WAN_CONS pipe id */
+	int ep = ipa2_get_ep_mapping(IPA_CLIENT_APPS_WAN_CONS);
+
+	if (ep < 0)
+		ep = 5;	/* SDM636/660 v2.6L APPS_WAN_CONS */
+	return sysfs_emit(buf, "%d\n", ep);
 }
 static DEVICE_ATTR_RO(rx_endpoint_id);
 
