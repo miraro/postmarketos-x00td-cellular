@@ -6,8 +6,10 @@ wiki, (3) cross-post to PostmarketOS Matrix / forum. Drafts for
 
 ## 1. Push repo to GitHub
 
-The staged repo at `~/postmarketos-x00td-cellular/` already has the
-initial commit on `main`. Two choices for the push:
+The repo (this directory) is ready on `main`: pristine vendor baseline,
+documented script pipeline, vendor-init, full writeup — all
+hardware-re-validated (20.6 Mbps DL, 2026-06-06). Two choices for the
+push:
 
 ### Option A — `gh` CLI (recommended)
 
@@ -17,7 +19,7 @@ initial commit on `main`. Two choices for the push:
 gh auth login --web
 
 # Create the repo and push in one shot
-cd ~/postmarketos-x00td-cellular
+cd /path/to/postmarketos-x00td-cellular
 gh repo create postmarketos-x00td-cellular --public --source=. --push \
    --description "Working mainline cellular bringup for Asus Zenfone Max Pro M1 (X00TD) on PostmarketOS — 20.5 Mbps DL"
 ```
@@ -28,7 +30,7 @@ gh repo create postmarketos-x00td-cellular --public --source=. --push \
    (no README/LICENSE — we ship our own)
 2. Then:
    ```bash
-   cd ~/postmarketos-x00td-cellular
+   cd /path/to/postmarketos-x00td-cellular
    git remote add origin https://github.com/<your-user>/postmarketos-x00td-cellular.git
    git push -u origin main
    ```
@@ -50,7 +52,8 @@ sections):
 
 Working mainline cellular data on the IPA v2.6L hardware has been
 prototyped — ~20.5 Mbps DL sustained on Vodafone CZ LTE, via a
-sondy-stripped port of the Asus 4.19 IPA driver and a small
+port of the Asus 4.19 IPA driver (shipped as a pristine vendor
+baseline + a documented, idempotent script pipeline) and a small
 userspace bearer-activation tool ("vendor-init") replacing
 ModemManager for primary cellular.
 
@@ -79,7 +82,8 @@ the Asus Zenfone Max Pro M1 (asus-x00td, SDM636). Userspace tool
 v2.6L driver back-ported from the 4.19 vendor sources + a small
 rmnet NETIF_F_IP_CSUM patch.
 
-Self-contained package (writeup + patch + vendor-init source):
+Self-contained package (writeup + vendor baseline + script
+pipeline + vendor-init source):
 https://github.com/<your-user>/postmarketos-x00td-cellular
 
 Caveats: out-of-tree, only primary cellular DL is production-ready,
