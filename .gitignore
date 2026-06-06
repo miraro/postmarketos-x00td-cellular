@@ -13,3 +13,6 @@ vendor-init/*.o
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Local publishing notes (not part of the package)
+PUBLISH_STEPS.md
