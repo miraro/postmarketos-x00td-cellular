@@ -38,6 +38,17 @@ static void try_cmd(const char *desc, const char *cmd)
 		LOGI(STAGE, "%s OK", desc);
 }
 
+/* Best-effort variant for knobs that are EXPECTED to be unavailable on
+ * some kernels — failure is logged at debug level only. */
+static void try_cmd_opt(const char *desc, const char *cmd)
+{
+	LOGD(STAGE, "exec: %s", cmd);
+	if (system(cmd) != 0)
+		LOGD(STAGE, "%s not available (expected on upstream rmnet)", desc);
+	else
+		LOGI(STAGE, "%s OK", desc);
+}
+
 static void try_write(const char *path, const char *value)
 {
 	FILE *f = fopen(path, "w");
@@ -149,9 +160,14 @@ int stage_post_tune(struct vi_ctx *ctx)
 	 * ethtool may print noisy failures if features aren't supported; pipe
 	 * to /dev/null for cleanliness. */
 	try_cmd("rmnet_ipa0 GRO on",  "ethtool -K rmnet_ipa0 gro on >/dev/null 2>&1");
-	try_cmd("qmapmux0.0 GSO on",  "ethtool -K qmapmux0.0 gso on >/dev/null 2>&1");
 	try_cmd("qmapmux0.0 GRO on",  "ethtool -K qmapmux0.0 gro on >/dev/null 2>&1");
-	try_cmd("qmapmux0.0 TSO on",  "ethtool -K qmapmux0.0 tso on >/dev/null 2>&1");
+	/* Upstream rmnet advertises no GSO/TSO feature bits, so these two
+	 * cannot succeed there (ethtool exits 1) — segmentation happens in
+	 * software before the parent device either way. Kept best-effort
+	 * for kernels whose rmnet does advertise them (Android downstream,
+	 * possible future mainline). */
+	try_cmd_opt("qmapmux0.0 GSO on", "ethtool -K qmapmux0.0 gso on >/dev/null 2>&1");
+	try_cmd_opt("qmapmux0.0 TSO on", "ethtool -K qmapmux0.0 tso on >/dev/null 2>&1");
 
 	/* --- RPS masks --- */
 	try_write("/sys/class/net/rmnet_ipa0/queues/rx-0/rps_cpus", "2");
