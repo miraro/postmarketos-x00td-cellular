@@ -264,6 +264,23 @@ mechanically, keep layouts byte-identical), `BLOCK_COMMENT_STYLE`(47)
 
 ---
 
+## Upstreaming TODO: SPS/BAM layer
+
+- Descriptor FIFOs: `dma_alloc_coherent()` everywhere on the cellular
+  path; vendor `ipa_pipe_mem_alloc()` is dead code here (no DT region,
+  callers disabled).
+- LATENT BUG (non-bypass SMMU only): desc-FIFO frees pass
+  `connect.desc.phys_base` to `dma_free_coherent()` — wrong handle
+  when S1 translation is on (OK under X00TD's S1 bypass).
+- ISRs are hardirq with in-code `IRQF_TRIGGER_RISING` overriding the
+  DT's LEVEL_HIGH; resolve (flags=0, DT governs) + consider threaded
+  IRQ only with a device in the loop. Handlers are short; data work is
+  NAPI/workqueue-deferred already.
+- `rmmod` cleanup untested — verify no stale BAM descriptors survive
+  a module reload before relying on it.
+
+---
+
 ## Order of attack (phase 1)
 
 1. Drop the source tree in place under `drivers/platform/msm/ipa/`

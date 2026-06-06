@@ -809,6 +809,42 @@ driver (58 files) gives the concrete TODO list:
   device in the loop.
 - One deprecated-API note: `idr_init` → `xa_init` (vendor NAT code).
 
+#### Upstreaming roadmap: SPS/BAM notes
+
+Audit results for the DMA/IRQ/teardown layer (the usual vendor-port
+trouble spots):
+
+- **Descriptor rings are dma-mapping clean** on the cellular path:
+  `ipa2_setup_sys_pipe()` allocates every descriptor FIFO with
+  `dma_alloc_coherent()` and handles the SMMU iova→phys split. The
+  vendor's custom `ipa_pipe_mem_alloc()` allocator exists in tree but
+  is dead on this target — no `qcom,ipa-pipe-mem` DT region, and its
+  only caller is the low-level `ipa2_connect()` used by the disabled
+  USB/WDI/teth clients.
+- **Latent bug for non-bypass SMMU configs:** the desc-FIFO free
+  paths pass `connect.desc.phys_base` to `dma_free_coherent()`. Under
+  S1 bypass (X00TD) phys == dma handle, so it is correct here — but
+  with S1 translation enabled `phys_base` is the *translated*
+  address, not the dma handle, and the free would corrupt. Fix before
+  running any non-bypass platform.
+- **IRQ architecture:** both the IPA and BAM ISRs are plain hardirq
+  handlers registered with `IRQF_TRIGGER_RISING` *in code*, while the
+  DT (per the bringup finding) declares both interrupts LEVEL_HIGH —
+  in-code trigger flags override DT, which deserves a clean
+  resolution (pass 0 and let DT govern) **with a device in the loop**,
+  since the current combination is what was validated. The handlers
+  themselves are short — the heavy lifting is deferred to NAPI /
+  workqueues, so threaded-IRQ conversion is an idiom step, not a
+  latency fix (WAN RX is NAPI-polled anyway because of the ~1 Hz EOT
+  quirk).
+- **Pipe teardown:** modem SSR runs `ipa_q6_pre_shutdown_cleanup()`
+  (Q6 pipe + table cleanup) and survived a real modem crash once
+  (validated single-restart; repeated-crash behavior is a known
+  caveat). A ModemManager restart does not touch the pipes at all
+  (QMI-level only). **Module unload (`rmmod`) cleanup is untested**
+  — stale BAM descriptors on re-insert are exactly the classic
+  failure mode to test for there.
+
 ---
 
 ## Debug instrumentation (sondy)
