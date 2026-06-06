@@ -782,6 +782,33 @@ The actual battery lever that exists today is the optional power-save
 patch (SVS at idle-ish, see *Power-save: dynamic IPA clock scaling*),
 which is orthogonal to the framework question.
 
+#### Upstreaming roadmap: vendor-cruft inventory
+
+Measured against the usual vendor-code stereotypes, this CAF source is
+cleaner than its reputation — but a checkpatch sweep of the whole
+driver (58 files) gives the concrete TODO list:
+
+- **`typedef struct` / custom alloc wrappers: zero.** The classic
+  `ipa_config_t` / `IPA_MEM_ALLOC()`-style offenses do not exist in
+  this codebase; structs are plain-tagged and allocations are direct
+  `kzalloc`/`kcalloc` calls.
+- **47 CamelCase `struct IpaHw*_t` tags** — the uC (microcontroller)
+  firmware ABI definitions. They mirror Qualcomm's firmware interface
+  documentation; upstream will want them renamed to kernel style,
+  which is mechanical but must keep the layouts byte-identical.
+- **checkpatch totals: 2 ERRORs, ~120 WARNINGs** — dominated by
+  `BLOCK_COMMENT_STYLE` (47) and `AVOID_EXTERNS` in .c files (44),
+  i.e. cosmetic vendor formatting. (The findings that were in *our*
+  port-added code — a `strncpy`, an `else`-after-brace, two bare
+  `unsigned` — are already fixed.)
+- **`devm_*` conversion:** probe-path allocations are raw (`ipa.c`
+  alone has ~25 `k*alloc` calls, zero `devm_`). Converting the probe
+  path to managed allocations would simplify the error/teardown
+  paths, but every site needs an audit against the existing manual
+  frees — do it together with the runtime-PM conversion, with a
+  device in the loop.
+- One deprecated-API note: `idr_init` → `xa_init` (vendor NAT code).
+
 ---
 
 ## Debug instrumentation (sondy)

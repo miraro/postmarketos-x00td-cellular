@@ -188,7 +188,7 @@ u32 msm_bus_scale_register_client(struct msm_bus_scale_pdata *pdata)
 	h->pdata = pdata;
 
 	/* Walk usecase[0] (init vectors) as the canonical set of paths. */
-	for (i = 0; i < (unsigned)pdata->usecase[0].num_paths; i++) {
+	for (i = 0; i < (unsigned int)pdata->usecase[0].num_paths; i++) {
 		struct msm_bus_vectors *v = &pdata->usecase[0].vectors[i];
 		const char *name = map_src_dst_to_icc_name(v->src, v->dst);
 
@@ -283,7 +283,7 @@ int msm_bus_scale_client_update_request(u32 cl, unsigned int index)
 	}
 
 	uc = &h->pdata->usecase[index];
-	for (i = 0; i < (unsigned)uc->num_paths; i++) {
+	for (i = 0; i < (unsigned int)uc->num_paths; i++) {
 		struct msm_bus_vectors *v = &uc->vectors[i];
 		struct icc_path *p = find_path(h, v->src, v->dst);
 		u32 ab_kbps, ib_kbps;

@@ -252,6 +252,18 @@ the loop — the paths involved carry the validated 20.6 Mbps datapath.
 
 ---
 
+## Upstreaming TODO: vendor-cruft inventory
+
+checkpatch over the whole driver (58 files): 2 ERRORs, ~120 WARNINGs.
+No `typedef struct` offenses, no custom alloc wrappers. The real
+items: 47 CamelCase `struct IpaHw*_t` uC-firmware-ABI tags (rename
+mechanically, keep layouts byte-identical), `BLOCK_COMMENT_STYLE`(47)
++ `AVOID_EXTERNS`(44) cosmetics, raw probe-path allocations (~25 in
+`ipa.c`) to convert to `devm_*` alongside the runtime-PM work, and
+`idr_init` → `xa_init` in the NAT code.
+
+---
+
 ## Order of attack (phase 1)
 
 1. Drop the source tree in place under `drivers/platform/msm/ipa/`
