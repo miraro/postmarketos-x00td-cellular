@@ -230,6 +230,28 @@ IRQF_TRIGGER_RISING depending on DT — leave as-is.
 
 ---
 
+## Upstreaming TODO: runtime PM
+
+Idle power gating works today: the vendor active-clients refcount
+(`ipa2_inc_client_enable_clks()` / `ipa2_dec_client_disable_clks()` /
+`ipa2_inc_client_enable_clks_no_block()` — the funnel for all ~166
+`IPA_ACTIVE_CLIENTS_*` macro sites) gates the clocks off at count 0.
+Mainline will want this expressed via the pm_runtime framework instead:
+
+- `runtime_resume` ≈ `ipa_enable_clks()`, `runtime_suspend` ≈
+  `ipa_disable_clks()` + the TAG-flush drain;
+- the resume path sleeps (clk_prepare_enable, icc votes) so
+  `pm_runtime_irq_safe()` is NOT usable — atomic contexts keep the
+  async get + workqueue-deferral pattern `..._no_block()` already
+  implements;
+- the SPS PM delayed release maps onto autosuspend.
+
+No power is gained on v2.6L by the conversion (gating is equivalent);
+it is an idiom/review-ability change. Convert only with a device in
+the loop — the paths involved carry the validated 20.6 Mbps datapath.
+
+---
+
 ## Order of attack (phase 1)
 
 1. Drop the source tree in place under `drivers/platform/msm/ipa/`

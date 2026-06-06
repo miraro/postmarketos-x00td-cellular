@@ -708,7 +708,41 @@ NAS service lookup may fail. Wait until `qmicli -d qrtr://0
 
 The IPA v2.6L driver port is out-of-tree and not upstream-ready.
 Upstreaming it would need significant cleanup. The rmnet feature
-patch (Section C) is a small standalone candidate.
+change (Section C) is a small standalone candidate.
+
+#### Upstreaming roadmap: runtime PM conversion
+
+The single biggest idiomatic gap for mainline review is power
+management. The driver does NOT leak power at idle — the vendor
+active-clients machinery is a complete hand-rolled runtime-PM
+equivalent (refcount in `ipa2_inc_client_enable_clks()` /
+`ipa2_dec_client_disable_clks()`; at count 0 the clocks are gated off
+via `ipa_disable_clks()` after a TAG flush, and atomic contexts use
+`ipa2_inc_client_enable_clks_no_block()` + workqueue deferral). But
+mainline wants this expressed through the `pm_runtime` framework, and
+a converter should know:
+
+1. **Chokepoints, not call sites.** All ~166 `IPA_ACTIVE_CLIENTS_*`
+   uses funnel into three functions in `ipa.c`. The conversion lands
+   there: `runtime_resume` ≈ `ipa_enable_clks()`, `runtime_suspend` ≈
+   `ipa_disable_clks()` (+ the TAG-flush as a `runtime_idle`/drain
+   step), sync paths become `pm_runtime_get_sync()` /
+   `pm_runtime_put_autosuspend()`.
+2. **The resume path sleeps** (`clk_prepare_enable`, interconnect
+   votes), so `pm_runtime_irq_safe()` is not an option. The atomic
+   TX/RX paths must keep the existing pattern — `pm_runtime_get()`
+   (async) plus the already-present workqueue deferral — which is
+   exactly what `..._no_block()` implements today.
+3. **Autosuspend delay** replaces the manual delayed-release dance in
+   the SPS PM code (`ipa_sps_process_irq_schedule_rel`).
+4. Net power gain on v2.6L: **zero** (gating behavior is identical);
+   the gain is framework integration and review-ability. Do it with a
+   device in the loop — this path is hot and the 20.6 Mbps figure is
+   easy to regress.
+
+The actual battery lever that exists today is the optional power-save
+patch (SVS at idle-ish, see *Power-save: dynamic IPA clock scaling*),
+which is orthogonal to the framework question.
 
 ---
 
