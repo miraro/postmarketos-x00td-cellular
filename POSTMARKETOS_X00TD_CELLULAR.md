@@ -679,6 +679,17 @@ patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch
   too slow for your link, raise `clock_scaling_bw_threshold_nominal`; for
   more throughput headroom, lower `clock_scaling_bw_threshold_turbo` so the
   active vote reaches TURBO.
+- **Idle→burst latency is the thing to test, not just bulk curl.** With
+  scaling on, the link idles at SVS (75 MHz); the first packets of a
+  burst (TCP slow-start when opening a web page) are processed at half
+  clock until the RM vote lands. Whether that reads as "micro-stutter"
+  is exactly what needs a real-feel test: web browsing, `ping` RTT from
+  idle vs. under load, time-to-first-byte on cold connections. All
+  three knobs are **live-tunable via debugfs** (no rebuild needed):
+  `/sys/kernel/debug/ipa/enable_clock_scaling`,
+  `.../clock_scaling_bw_threshold_nominal_mbps`,
+  `.../clock_scaling_bw_threshold_turbo_mbps` — so the A/B comparison
+  against the fixed-NOMINAL baseline takes minutes.
 - **Coarse, not finely load-following.** True throughput-proportional
   scaling needs IPACM/QMI to update the RM perf profiles at runtime; with
   the static 100 Mbps profile the clock is effectively idle-gated vs
@@ -1053,12 +1064,29 @@ The three components — kernel driver, `vendor-init`, in-kernel
 + IPACM` stack covers on stock Android, but with one bearer instead
 of many and no offload paths.
 
+### Hardwired assumptions (single-bearer by design)
+
+The emulation bakes in the single-primary-bearer shape end to end:
+the ADD_MUX step registers exactly one channel with `mux_id = 1`
+(`qmapmux0.0`), and the DL-acceleration QMI specs carry `mux_id = 1`
+with `rt_tbl_idx = 8` (= `ipa_dflt_wan_rt`) — the per-interface
+`ext_props` query refines those two when the interface is registered,
+but there is still only *one* of everything. `vendor-init` matches:
+one WDS bind, one bearer, one rmnet child.
+
+This is the right trade-off for primary cellular data, and it is
+also the hard boundary: **VoLTE (IMS bearer), MMS, or any
+multi-PDN setup will not work by tweaking constants** — they need
+multiple mux channels, per-bearer filter/route policy, dedicated
+QoS bearers (for IMS), and a second WDS session in userspace. That
+is IPACM's actual job.
+
 ### When you would need the real IPACM
 
 Reach for the full daemon if you need any of:
 
 - Multiple simultaneous bearers (multi-PDN) with per-bearer
-  filter/route policy
+  filter/route policy — VoLTE/IMS and MMS land here
 - WLAN AP offload (data through IPA HW instead of the CPU)
 - USB tethering offload
 - Carrier-grade NAT timeout precision
