@@ -678,9 +678,10 @@ patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch
 **Caveats**
 
 - **Not hardware-tested.** Re-measure DL/UL after applying. If SVS proves
-  too slow for your link, raise `clock_scaling_bw_threshold_nominal`; for
-  more throughput headroom, lower `clock_scaling_bw_threshold_turbo` so the
-  active vote reaches TURBO.
+  too slow for your link, **lower** `clock_scaling_bw_threshold_nominal` so
+  the active vote clears it and lands on NOMINAL (raising it enlarges the
+  SVS region and makes the problem worse); for more throughput headroom,
+  lower `clock_scaling_bw_threshold_turbo` so the active vote reaches TURBO.
 - **Idle→burst latency is the thing to test, not just bulk curl.** With
   scaling on, the link idles at SVS (75 MHz); the first packets of a
   burst (TCP slow-start when opening a web page) are processed at half
