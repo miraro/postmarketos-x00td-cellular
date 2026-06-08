@@ -22,20 +22,28 @@
    So this patch is a single localised change in ipa_v2/ipa.c:
      1. enable_clock_scaling = 1   -> RM votes now move the clock.
      2. Lower the v2.0 bandwidth thresholds (nominal 600->50, turbo
-        1000->150 Mbps). The vendor values target gigabit WLAN offload;
-        the cellular RM profile only votes ~100 Mbps, so with the stock
-        thresholds scaling would pin SVS=75 MHz even under load (the
-        original reason it was disabled). Retuned so ~100 Mbps active ->
-        NOMINAL (150 MHz, the proven 20.5 Mbps DL rate), idle -> SVS=75,
-        >150 Mbps bursts -> TURBO=200.
+        1000->250 Mbps). The vendor values target gigabit WLAN offload;
+        with them every check falls through to SVS=75 MHz even under load
+        (the original reason scaling was disabled). HW-measured on X00TD
+        (2026-06-08): the aggregate cellular RM vote lands in [150,250)
+        Mbps -- higher than the ~100 originally assumed. So nominal=50
+        keeps the active vote above NOMINAL, and turbo=250 (above the
+        measured vote ceiling) holds it AT NOMINAL instead of letting it
+        reach TURBO. Result: idle -> SVS=75, active -> NOMINAL=150,
+        TURBO=200 reserved for >250 Mbps (never on cellular). Measured:
+        100 MB DL = 2.51 MB/s (~20 Mbps) at NOMINAL, identical to TURBO,
+        so the 200->150 MHz drop costs zero throughput.
      3. Boot stays at TURBO (curr_ipa_clk_rate unchanged) for the Q6
         handshake.
 
- RESULTING BEHAVIOUR
+ RESULTING BEHAVIOUR (HW-measured, X00TD, 2026-06-08)
    - fully idle:        clock gated off    (active-clients refcount, already)
-   - active data:       NOMINAL 150 MHz    (RM ~100 Mbps vote)
-   - active, unvoted:   SVS 75 MHz         (new idle-ish saving)
-   - >150 Mbps burst:   TURBO 200 MHz
+   - active data:       NOMINAL 150 MHz    (RM vote [150,250) Mbps, turbo=250)
+   - active, unvoted:   SVS 75 MHz         (new idle-ish saving; seen within
+                                            seconds of the vote releasing)
+   - >250 Mbps burst:   TURBO 200 MHz      (unreachable on cellular)
+   Cold-start cost: first packet after idle ~43 ms vs ~22 ms warm (one-packet
+   penalty); cold HTTPS TTFB 0.27-0.29 s, stable -- no perceptible stutter.
 
  CAVEATS / TUNING
    - Throughput-proportional scaling needs IPACM/QMI to update the RM perf
@@ -43,18 +51,20 @@
      coarse (idle-gated vs active-NOMINAL), not finely load-following.
    - For idle savings to show on the power rail, also drop the board DTS
      "assigned-clock-rates = <200000000>" pin so the driver owns the rate.
-   - NOT hardware-tested. Verify DL/UL throughput is unchanged after
-     applying; if SVS proves too slow for your link, lower
+   - Hardware-tested on X00TD (2026-06-08): DL unchanged at ~20 Mbps,
+     scaling confirmed dynamic (SVS idle <-> NOMINAL active), no stutter.
+     If you re-tune: to keep active out of SVS, lower
      clock_scaling_bw_threshold_nominal (raising it enlarges the SVS
-     region and makes it worse), or bias to TURBO by lowering
-     clock_scaling_bw_threshold_turbo.
+     region and makes it worse). turbo=250 deliberately parks active at
+     NOMINAL; lower it toward 150 only if you WANT active to ride TURBO
+     (200 MHz) -- measured to give no extra throughput here.
 
  Generated: 2026-06-04
 ================================================================
 
 --- a/drivers/platform/msm/ipa/ipa_v2/ipa.c
 +++ b/drivers/platform/msm/ipa/ipa_v2/ipa.c
-@@ -3974,19 +3974,42 @@ static int ipa_init(const struct ipa_plat_drv_res *resource_p,
+@@ -3974,19 +3974,47 @@ static int ipa_init(const struct ipa_plat_drv_res *resource_p,
  	if (result)
  		goto fail_clk;
  
@@ -83,27 +93,32 @@
 -	 * curr_ipa_clk_rate is still initialised to TURBO here, so init paths
 -	 * see full bandwidth before NOMINAL takes over.
 +	 * Threshold retune. The vendor v2.0 thresholds (nominal 600 / turbo
-+	 * 1000 Mbps) target gigabit WLAN-offload. The cellular RM perf profile
-+	 * only votes ~100 Mbps, so with the stock thresholds every check still
-+	 * fell through to SVS = 75 MHz even under data load — which is exactly
-+	 * why scaling was originally disabled. Lower them so the ~100 Mbps active
-+	 * vote lands on NOMINAL (the proven-good 20.5 Mbps DL rate), leaving SVS
-+	 * for idle and TURBO for >150 Mbps bursts. Tune for a throughput bias
-+	 * (lower turbo) or deeper idle saving (raise nominal).
++	 * 1000 Mbps) target gigabit WLAN-offload, so every check fell through to
++	 * SVS = 75 MHz even under load — exactly why scaling was disabled.
++	 * HW-measured on X00TD (2026-06-08): the aggregate cellular RM vote sits
++	 * in [150,250) Mbps, higher than the ~100 first assumed. So nominal=50
++	 * keeps the active vote clear of SVS, and turbo=250 (above the measured
++	 * vote ceiling) parks active AT NOMINAL (150 MHz) rather than TURBO. A
++	 * 100 MB DL ran at 2.51 MB/s (~20 Mbps) at NOMINAL — identical to TURBO,
++	 * so the 200->150 MHz drop is free. SVS stays for idle, TURBO (200) is
++	 * reserved for >250 Mbps and never reached on cellular. Tune: lower
++	 * nominal to keep active out of SVS; lower turbo toward 150 only to let
++	 * active ride TURBO (no measured throughput gain here).
 +	 *
 +	 * curr_ipa_clk_rate stays initialised to TURBO so the boot / Q6 handshake
 +	 * runs at full clock before the RM-driven profile takes over.
 +	 *
 +	 * NOTE: throughput-proportional scaling needs IPACM/QMI to update the RM
-+	 * perf profiles at runtime; with the static 100 Mbps profile the scaling
-+	 * is coarse (idle-gated vs active-NOMINAL). For idle savings to show on
-+	 * the rail, also drop the board DTS "assigned-clock-rates = <200000000>"
-+	 * pin so the driver — not RPM — owns the rate.
++	 * perf profiles at runtime; with the static profile the scaling is coarse
++	 * (binary: SVS idle vs NOMINAL active, not load-following). For idle
++	 * savings to show on the rail, also drop the board DTS
++	 * "assigned-clock-rates = <200000000>" pin so the driver — not RPM —
++	 * owns the rate.
  	 */
 -	ipa_ctx->enable_clock_scaling = 0;
 +	ipa_ctx->enable_clock_scaling = 1;
 +	ipa_ctx->ctrl->clock_scaling_bw_threshold_nominal = 50;
-+	ipa_ctx->ctrl->clock_scaling_bw_threshold_turbo = 150;
++	ipa_ctx->ctrl->clock_scaling_bw_threshold_turbo = 250;
  	ipa_ctx->curr_ipa_clk_rate = ipa_ctx->ctrl->ipa_clk_rate_turbo;
  
  	/* enable IPA clocks explicitly to allow the initialization */

@@ -22,20 +22,36 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 [ -d "$IPA_DBG" ] || die "no $IPA_DBG — is the ipa module loaded with CONFIG_IPA_DEBUG=y?"
 
-# Locate the IPA core clock node under /sys/kernel/debug/clk.
-# RPM_SMD_IPA_CLK shows up in clk_summary; the per-clk dir name varies by
-# rpmcc naming, so match case-insensitively and prefer an exact 'ipa' word.
+# Locate the IPA *core* clock node under /sys/kernel/debug/clk.
+#
+# On SDM660 two ipa clocks show up:
+#   ipa_clk    -> bound to 14780000.ipa as core_clk    (the real rate: 75/150/200 MHz)
+#   ipa_a_clk  -> deviceless RPM active-set vote handle (rate = 2147483647 = INT_MAX,
+#                 NOT a real frequency)
+# The bare *ipa* glob hits ipa_a_clk first (alpha order) and reports the
+# INT_MAX placeholder, so: prefer an exact ipa_clk node and reject the
+# INT_MAX placeholder anywhere.
+INT_MAX=2147483647
 find_clk() {
-	# 1) exact-ish dir match
-	for d in "$CLK_DBG"/*ipa* "$CLK_DBG"/*IPA*; do
-		[ -r "$d/clk_rate" ] && { echo "$d"; return 0; }
+	# 1) prefer the exact core-clock node name(s)
+	for d in "$CLK_DBG"/ipa_clk "$CLK_DBG"/*ipa_clk; do
+		[ -r "$d/clk_rate" ] || continue
+		[ "$(cat "$d/clk_rate" 2>/dev/null)" = "$INT_MAX" ] && continue
+		echo "$d"; return 0
 	done
-	# 2) fall back to scanning clk_summary for an ipa line, then map to a dir
+	# 2) any ipa dir, but skip the INT_MAX vote-handle
+	for d in "$CLK_DBG"/*ipa* "$CLK_DBG"/*IPA*; do
+		[ -r "$d/clk_rate" ] || continue
+		[ "$(cat "$d/clk_rate" 2>/dev/null)" = "$INT_MAX" ] && continue
+		echo "$d"; return 0
+	done
+	# 3) fall back to clk_summary -> resolve names to dirs, skip INT_MAX
 	if [ -r "$CLK_DBG/clk_summary" ]; then
-		name=$(grep -i 'ipa' "$CLK_DBG/clk_summary" \
-		       | awk '{print $1}' | head -n1)
-		[ -n "$name" ] && [ -r "$CLK_DBG/$name/clk_rate" ] \
-			&& { echo "$CLK_DBG/$name"; return 0; }
+		for name in $(awk 'tolower($1) ~ /ipa/ {print $1}' "$CLK_DBG/clk_summary"); do
+			[ -r "$CLK_DBG/$name/clk_rate" ] || continue
+			[ "$(cat "$CLK_DBG/$name/clk_rate")" = "$INT_MAX" ] && continue
+			echo "$CLK_DBG/$name"; return 0
+		done
 	fi
 	return 1
 }
@@ -46,6 +62,7 @@ rate_to_state() {
 		150000000) echo "NOMINAL(150 MHz)";;
 		 75000000) echo "SVS    ( 75 MHz)";;
 		        0) echo "gated/0";;
+		2147483647) echo "max/unset (RPM vote handle, not core_clk)";;
 		        *) echo "?(${1} Hz)";;
 	esac
 }

@@ -1,8 +1,26 @@
 # Power-save patch — on-device validation plan
 
 Validates `patches/sdm660-ipa-port-6.19-powersave.patch` (+ the DT pin
-drop) on a real X00TD. The patch is **not hardware-tested** as shipped;
-this is the procedure that closes that gap.
+drop) on a real X00TD. This is the procedure that produced the measured
+result below; keep it for re-validation after kernel bumps.
+
+> ## ✅ Measured result (X00TD, 2026-06-08)
+> Ran on hardware. Outcome:
+> - **Clock scaling works and is dynamic** — `/sys/kernel/debug/clk/ipa_clk`
+>   moves SVS (75 MHz) at idle ⇄ active under load, dropping back to SVS
+>   within seconds of the vote releasing. (Watch `ipa_clk`, **not**
+>   `ipa_a_clk` — the latter is the deviceless RPM vote handle and reads
+>   `2147483647`/INT_MAX, not a real rate.)
+> - **The active RM vote is [150, 250) Mbps**, higher than the ~100 first
+>   assumed. So the original `turbo=150` made active ride **TURBO (200 MHz)**.
+> - **`turbo` raised 150→250** (the shipped default) parks active at
+>   **NOMINAL (150 MHz)**. A 100 MB DL = **2.51 MB/s (~20 Mbps) at NOMINAL,
+>   identical to TURBO** → the 200→150 MHz drop is free.
+> - **Cold-start latency fine**: first ping after idle ~43 ms vs ~22 ms warm
+>   (one-packet bump), cold HTTPS TTFB stable 0.27–0.29 s, no stutter.
+>
+> Default shipped: `nominal=50, turbo=250` → idle SVS, active NOMINAL,
+> TURBO reserved for >250 Mbps (never on cellular).
 
 Instrument: `patches/powersave-validate.sh` (push to the device, run as
 root). It samples the IPA core-clock state while *you* drive traffic.
@@ -44,8 +62,10 @@ ssh root@<device> chmod +x /tmp/powersave-validate.sh
 Expect:
 - `enable_clock_scaling = 1`
 - `clock_scaling_bw_threshold_nominal_mbps = 50`
-- `clock_scaling_bw_threshold_turbo_mbps  = 150`
-- a clk node found, printing a real rate
+- `clock_scaling_bw_threshold_turbo_mbps  = 250`
+- clk node `…/ipa_clk` printing a real rate (75/150/200 MHz). If it instead
+  reports `2147483647` it matched `ipa_a_clk` — the RPM vote handle; the
+  script prefers `ipa_clk` and skips that placeholder.
 
 If `enable_clock_scaling = 0` → the patch didn't build in (wrong tree).
 If no clk node found → tell me the output of
@@ -145,9 +165,9 @@ behaviour without rebuilding, to compare directly.
 /tmp/powersave-validate.sh set 1 999999
 echo 0 > /sys/kernel/debug/ipa/enable_clock_scaling   # or keep scaling but pin
 # ... run §4 measurements ...
-# restore power-save:
+# restore power-save default:
 echo 1 > /sys/kernel/debug/ipa/enable_clock_scaling
-/tmp/powersave-validate.sh set 50 150
+/tmp/powersave-validate.sh set 50 250
 ```
 
 Record both sets of cold-TTFB / cold-RTT numbers. Decision:
@@ -165,11 +185,13 @@ Record both sets of cold-TTFB / cold-RTT numbers. Decision:
 
 - **Leave SVS sooner / less stutter** → **lower** `nominal_thr`.
 - **Reach TURBO under load** → **lower** `turbo_thr` below the RM active
-  vote (~100 Mbps).
+  vote (measured [150, 250) Mbps).
 - **Deeper idle saving** → **raise** `nominal_thr` (bigger SVS region).
 
-(Note: the main doc's caveat phrases the first one backwards — "raise
-nominal if SVS too slow". Lowering is correct. Flagged for a doc fix.)
+Measured-vote consequence: the active vote is [150, 250) Mbps, so `turbo_thr`
+above 250 keeps active at NOMINAL (the shipped default, 250), below 150 sends
+it to TURBO. The original `turbo=150` therefore rode TURBO; 250 parks it at
+NOMINAL with identical throughput.
 
 ---
 
