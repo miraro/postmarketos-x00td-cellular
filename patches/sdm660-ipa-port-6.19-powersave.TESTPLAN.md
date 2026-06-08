@@ -7,20 +7,25 @@ result below; keep it for re-validation after kernel bumps.
 > ## ✅ Measured result (X00TD, 2026-06-08)
 > Ran on hardware. Outcome:
 > - **Clock scaling works and is dynamic** — `/sys/kernel/debug/clk/ipa_clk`
->   moves SVS (75 MHz) at idle ⇄ active under load, dropping back to SVS
->   within seconds of the vote releasing. (Watch `ipa_clk`, **not**
+>   gates at idle and runs SVS (75 MHz) when active. (Watch `ipa_clk`, **not**
 >   `ipa_a_clk` — the latter is the deviceless RPM vote handle and reads
 >   `2147483647`/INT_MAX, not a real rate.)
 > - **The active RM vote is [150, 250) Mbps**, higher than the ~100 first
->   assumed. So the original `turbo=150` made active ride **TURBO (200 MHz)**.
-> - **`turbo` raised 150→250** (the shipped default) parks active at
->   **NOMINAL (150 MHz)**. A 100 MB DL = **2.51 MB/s (~20 Mbps) at NOMINAL,
->   identical to TURBO** → the 200→150 MHz drop is free.
-> - **Cold-start latency fine**: first ping after idle ~43 ms vs ~22 ms warm
->   (one-packet bump), cold HTTPS TTFB stable 0.27–0.29 s, no stutter.
+>   assumed. Sweeping thresholds confirmed all three states: turbo=150 →
+>   active TURBO(200); turbo=250 → active NOMINAL(150); nominal>250 →
+>   active SVS(75). Throughput **identical (2.51 MB/s ≈ 20 Mbps) at all
+>   three** — the cell is the bottleneck, not the IPA core clock.
+> - **SVS (75 MHz) sustains the full link**: 100 MB DL at SVS = 2.51 MB/s,
+>   **73 Mbps peak**. Latency under load ~37 ms vs ~31 ms at NOMINAL (~+5 ms,
+>   partly cellular jitter). Cold first ping after idle ~43 ms vs ~22 ms warm.
+> - No floor-clamp (verified in code: RM resources created with
+>   `floor_voltage=0`/UNSPECIFIED), so thresholds fully control the state and
+>   active-SVS is reachable.
 >
-> Default shipped: `nominal=50, turbo=250` → idle SVS, active NOMINAL,
-> TURBO reserved for >250 Mbps (never on cellular).
+> **Default shipped: `nominal=600, turbo=1000` (vendor values, kept) →
+> idle gated, active SVS (75 MHz) — the deepest power-save.** NOMINAL/TURBO
+> are unreachable on cellular. To trade ~5 ms latency back for half the
+> active power, set `nominal=50` (active → NOMINAL 150 MHz) live.
 
 Instrument: `patches/powersave-validate.sh` (push to the device, run as
 root). It samples the IPA core-clock state while *you* drive traffic.
@@ -61,8 +66,8 @@ ssh root@<device> chmod +x /tmp/powersave-validate.sh
 
 Expect:
 - `enable_clock_scaling = 1`
-- `clock_scaling_bw_threshold_nominal_mbps = 50`
-- `clock_scaling_bw_threshold_turbo_mbps  = 250`
+- `clock_scaling_bw_threshold_nominal_mbps = 600`
+- `clock_scaling_bw_threshold_turbo_mbps  = 1000`
 - clk node `…/ipa_clk` printing a real rate (75/150/200 MHz). If it instead
   reports `2147483647` it matched `ipa_a_clk` — the RPM vote handle; the
   script prefers `ipa_clk` and skips that placeholder.
@@ -84,22 +89,24 @@ Two shells. Shell A samples, shell B drives the load.
 curl -o /dev/null http://cachefly.cachefly.net/100mb.test
 ```
 
-**Pass:** DL completes at ~20 Mbps (≈2.5 MB/s), and shell A shows the
-clock sitting at **NOMINAL (150 MHz)** for the duration of the transfer.
+**Pass:** DL completes at ~20 Mbps (≈2.5 MB/s) with shell A showing the
+clock at **SVS (75 MHz)** for the duration — that is the shipped default
+(`nominal=600`) and the whole point: SVS sustains the link (measured
+73 Mbps peak), so the DL is *not* throttled despite the low clock.
 
 **Fail modes & fix (live, no rebuild):**
 | Symptom in shell A during DL | Meaning | Fix |
 |---|---|---|
-| stuck at **SVS (75 MHz)**, DL ≈ half | RM active vote `< nominal_thr` | `set` nominal lower, e.g. `set 20 150`; re-test. If still SVS, the RM vote isn't reaching the clock — stop, tell me, it's not a threshold issue. |
-| at **NOMINAL**, DL ~20 Mbps | correct | ✓ continue |
-| jumps to **TURBO (200)** | vote ≥150 (won't happen on a 20 Mbps cell) | harmless |
+| at **SVS (75 MHz)**, DL ~20 Mbps | correct (shipped default) | ✓ continue |
+| at **SVS (75 MHz)**, DL **≈ half** | SVS genuinely throttling *this* link | `set 50 1000` → active NOMINAL(150); re-test. If that fixes it, ship `nominal=50` instead. |
+| at **NOMINAL/TURBO** | thresholds were lowered below the [150,250) vote | expected only if you ran `set`; `set 600 1000` to restore default |
 
 UL check (aggregate, 4 streams):
 ```bash
 for i in 1 2 3 4; do curl -X POST --data-binary @50mb.bin \
   https://httpbin.org/post -o /dev/null & done; wait
 ```
-**Pass:** ~4 Mbps aggregate (same as baseline), clock at NOMINAL.
+**Pass:** ~4 Mbps aggregate (same as baseline), clock at SVS.
 
 ---
 
@@ -111,10 +118,10 @@ for i in 1 2 3 4; do curl -X POST --data-binary @50mb.bin \
 # shell B: do nothing — leave the bearer up and idle
 ```
 
-**Expect** over the idle window, shell A shows the rate fall away from
-NOMINAL: either **gated** (`active_clients = 0`, rate stale/0) when fully
-idle, or **SVS (75 MHz)** while active-but-unvoted. This is the saving the
-patch buys — under the base port it would pin NOMINAL whenever active.
+**Expect** the clock sits at **SVS (75 MHz)** whenever active and drops to
+**gated** (`active_clients = 0`, rate stale/0) when fully idle. This is the
+saving the patch buys — under the base port it would pin NOMINAL (150 MHz)
+whenever active, never dropping to SVS.
 
 Optionally watch the driver's own decision log:
 ```bash
@@ -144,38 +151,41 @@ for i in 1 2 3; do
 done
 ```
 
-**Judge:** compare cold TTFB / cold-ping RTT against the fixed-NOMINAL
-baseline (same measurements with `set` reverted — see §5). A small bump
-(tens of ms) on the first cold packet is expected and fine. If cold web
-page loads feel *stuttery*, bias out of SVS:
-- `set 1 150` → effectively always ≥ NOMINAL when active/voted (keeps
-  idle gating, drops the active-SVS state). This is the conservative
-  middle ground between the base port and aggressive power-save.
+**Judge:** compare cold TTFB / cold-ping RTT at the SVS default against a
+NOMINAL-active run (same measurements after `set 50 1000` — see §5). A
+small bump (tens of ms) on the first cold packet is expected and fine.
+Measured: warm-under-load ~37 ms at SVS vs ~31 ms at NOMINAL. If cold web
+page loads feel *stuttery* at SVS, bias up:
+- `set 50 1000` → active parks at NOMINAL (150 MHz) instead of SVS (keeps
+  idle gating). This is the conservative middle ground; ship `nominal=50`
+  if you prefer it.
 
 ---
 
-## 5. A/B against the fixed-NOMINAL baseline (no reflash)
+## 5. A/B between the candidate defaults (no reflash)
 
-The whole point of the live knobs: you can reproduce the *base port*
-behaviour without rebuilding, to compare directly.
+The live knobs let you compare all three active states without rebuilding:
 
 ```bash
-# emulate base port (always NOMINAL when active): make NOMINAL trivial,
-# TURBO unreachable
-/tmp/powersave-validate.sh set 1 999999
-echo 0 > /sys/kernel/debug/ipa/enable_clock_scaling   # or keep scaling but pin
-# ... run §4 measurements ...
-# restore power-save default:
-echo 1 > /sys/kernel/debug/ipa/enable_clock_scaling
-/tmp/powersave-validate.sh set 50 250
+# active = SVS (75 MHz) — the shipped default:
+/tmp/powersave-validate.sh set 600 1000
+# active = NOMINAL (150 MHz) — the conservative alternative:
+/tmp/powersave-validate.sh set 50 1000
+# active = TURBO (200 MHz) — for reference only:
+/tmp/powersave-validate.sh set 50 150
+# ... run §4 cold/warm measurements at each ...
+# restore the shipped default:
+/tmp/powersave-validate.sh set 600 1000
 ```
 
-Record both sets of cold-TTFB / cold-RTT numbers. Decision:
-- power-save cold latency ≈ baseline → **ship power-save as default**.
-- noticeable cold stutter, bulk fine → ship the **`set 1 150`** middle
-  ground (idle gating kept, active-SVS dropped).
-- any bulk-throughput regression that thresholds can't fix → **don't
-  ship**; the RM vote plumbing needs a look first.
+**Measured decision (2026-06-08):** throughput identical at all three
+(2.51 MB/s ≈ 20 Mbps); SVS adds only ~5 ms warm latency for half the active
+core-clock power → **shipped `nominal=600/turbo=1000` (active = SVS)**.
+Re-run this on your own link if you want to re-pick:
+- SVS cold/warm latency acceptable → keep the default (deepest saving).
+- SVS feels stuttery, NOMINAL fixes it → ship `nominal=50` (active NOMINAL).
+- any bulk-throughput regression thresholds can't fix → the RM vote
+  plumbing needs a look first.
 
 ---
 
@@ -188,10 +198,11 @@ Record both sets of cold-TTFB / cold-RTT numbers. Decision:
   vote (measured [150, 250) Mbps).
 - **Deeper idle saving** → **raise** `nominal_thr` (bigger SVS region).
 
-Measured-vote consequence: the active vote is [150, 250) Mbps, so `turbo_thr`
-above 250 keeps active at NOMINAL (the shipped default, 250), below 150 sends
-it to TURBO. The original `turbo=150` therefore rode TURBO; 250 parks it at
-NOMINAL with identical throughput.
+Measured-vote consequence: the active vote is [150, 250) Mbps. So
+`nominal_thr` **above 250** (shipped default 600) parks active at **SVS**;
+`nominal=50, turbo=1000` parks it at **NOMINAL**; `turbo` **below 150**
+sends it to **TURBO**. Throughput is identical at all three — SVS is the
+shipped default because it is the deepest saving at no throughput cost.
 
 ---
 

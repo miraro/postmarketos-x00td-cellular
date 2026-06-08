@@ -451,9 +451,13 @@ Key non-obvious bits other porters trip over:
 - **`assigned-clock-rates = <200000000>`** pins IPA core_clk at the
   turbo 200 MHz rate. In the **base** port the driver's clk-scaling is
   disabled, so the rate has to come from DT or you get the boot-default
-  ~75 MHz and a ~3.4× latency hit. If you apply the optional power-save
-  patch + overlay (see **Power-save: dynamic IPA clock scaling** below),
-  the driver owns the rate instead and this pin should be dropped.
+  ~75 MHz and a higher *IPA-internal* processing latency. (Note: the
+  power-save work later measured that 75 MHz costs only ~+5 ms *end-to-end*
+  RTT and **no throughput** on this ~20 Mbps link — the radio dominates, so
+  the internal-latency penalty barely surfaces. See **Power-save** below.)
+  If you apply the optional power-save patch + overlay (see **Power-save:
+  dynamic IPA clock scaling** below), the driver owns the rate instead and
+  this pin should be dropped.
 
 The full block is in
 `port/files/arch/arm64/boot/dts/qcom/sdm636-asus-x00td.dts` (the
@@ -629,12 +633,12 @@ IPA Resource Manager, although fully compiled and wired (see *What's NOT
 ported §3*), never moves the clock. This is the simplest, known-good
 configuration and is what the 20.5 Mbps DL figure was measured on.
 
-Two opt-in artefacts re-enable dynamic, load-following clock scaling so
-the core clock can drop when the link is idle:
+Two opt-in artefacts re-enable dynamic clock scaling so the core clock
+runs low whenever the modem path is not saturating it:
 
 | Artefact | What it changes |
 |---|---|
-| `patches/sdm660-ipa-port-6.19-powersave.patch` | `ipa_v2/ipa.c`: `enable_clock_scaling = 1`, and retunes the v2.0 bandwidth thresholds (nominal 600→50, turbo 1000→250 Mbps) so the cellular RM vote moves the clock and parks active data at NOMINAL. Boot stays at TURBO for the Q6 handshake. |
+| `patches/sdm660-ipa-port-6.19-powersave.patch` | `ipa_v2/ipa.c`: `enable_clock_scaling = 1`, thresholds kept at the vendor values (nominal 600 / turbo 1000 Mbps, set explicitly). The static cellular RM vote never reaches them, so **active data runs at SVS = 75 MHz** — hardware-proven to sustain the full link. Boot stays at TURBO for the Q6 handshake. |
 | `dts/sdm636-asus-x00td-ipa-powersave.dtso` | DT **overlay** dropping the `assigned-clocks` / `assigned-clock-rates = <200000000>` pin from `&ipa`, handing the rate to the driver. Clocks and interconnects inherited unchanged. |
 | `patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch` | Drops the `.dtso` into `arch/arm64/boot/dts/qcom/` and registers it as a `.dtbo` build target in the qcom Makefile (for overlay-capable boot chains). |
 | `patches/sdm636-asus-x00td-ipa-powersave-dts.patch` | The same pin removal as a **direct patch** to `sdm636-asus-x00td.dts`, for boot chains that cannot apply overlays. |
@@ -642,27 +646,28 @@ the core clock can drop when the link is idle:
 Pick the DT side **one** way: the direct DTS patch *or* the overlay
 (`.dtso` + `.dtbo` registration) — not both.
 
-**Why the threshold retune is mandatory.** The vendor v2.0 thresholds
-(nominal 600 / turbo 1000 Mbps) target gigabit WLAN-offload, so with them
-*every* check falls through to SVS = 75 MHz even under data load — which
-would **halve** the clock vs NOMINAL and throttle the link. That is exactly
-why the base port disabled scaling. **Hardware measurement (X00TD,
-2026-06-08)** showed the aggregate cellular RM vote actually lands in
-**[150, 250) Mbps** — higher than the ~100 first assumed. So `nominal=50`
-keeps the active vote above SVS, and `turbo=250` (just above the measured
-vote ceiling) parks active data at **NOMINAL (150 MHz)** instead of letting
-it reach TURBO. A 100 MB DL ran at **2.51 MB/s (~20 Mbps) at NOMINAL —
-identical to the same DL at TURBO**, confirming the 200→150 MHz drop costs
-zero throughput on this link.
+**Why thresholds stay high (active = SVS).** The base port *disabled*
+scaling because it feared the vendor thresholds (nominal 600 / turbo 1000
+Mbps, sized for gigabit WLAN-offload) would make *every* check "fall
+through to SVS = 75 MHz even under data load" and throttle the link.
+**Hardware measurement (X00TD, 2026-06-08) proved that fear unfounded —
+and turned it into the feature.** The aggregate cellular RM vote measured
+**[150, 250) Mbps**, far below the 600 nominal threshold, so active data
+does ride SVS — and SVS *sustains the whole link*: a 100 MB DL ran
+**2.51 MB/s (~20 Mbps) with a 73 Mbps peak at SVS, identical to NOMINAL
+and TURBO**. The cell, not the 75 MHz IPA core clock, is the bottleneck.
+So the patch keeps the thresholds high on purpose: active = SVS halves the
+active core-clock power for **zero throughput cost** (the only measurable
+price is ~+5 ms latency under sustained load, partly cellular jitter).
 
 **Resulting behaviour** *(hardware-measured, X00TD, 2026-06-08)*
 
 | State | IPA core_clk |
 |---|---|
 | fully idle | gated off (active-clients refcount — already, unchanged) |
-| active data (RM vote [150,250) Mbps) | NOMINAL 150 MHz |
-| active but unvoted | SVS 75 MHz *(new idle-ish saving; drops within seconds of the vote releasing)* |
-| > 250 Mbps burst | TURBO 200 MHz *(unreachable on cellular)* |
+| **active data** (RM vote [150,250) « 600) | **SVS 75 MHz** *(the saving)* |
+| > 600 Mbps | NOMINAL 150 MHz *(never on cellular)* |
+| > 1000 Mbps | TURBO 200 MHz *(never on cellular)* |
 
 **Apply**
 
@@ -681,28 +686,29 @@ patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch
 
 **Caveats**
 
-- **Hardware-tested (X00TD, 2026-06-08).** DL unchanged at ~20 Mbps,
-  scaling confirmed dynamic (SVS at idle ⇄ NOMINAL under load), no
-  perceptible stutter (see latency note below). The clock node to watch
-  is `/sys/kernel/debug/clk/**ipa_clk**` — *not* `ipa_a_clk`, which is the
-  deviceless RPM active-vote handle and reads `2147483647` (INT_MAX), not
-  a real rate. If you re-tune: to keep active out of SVS, **lower**
-  `clock_scaling_bw_threshold_nominal` (raising it enlarges the SVS region
-  and makes that worse). `turbo=250` deliberately parks active at NOMINAL;
-  lower it toward 150 only if you *want* active to ride TURBO (200 MHz) —
-  measured to give no extra throughput on this link.
-- **Idle→burst latency was the real risk — measured OK.** With scaling on
-  the link idles at SVS (75 MHz), so the first packet of a cold burst runs
-  at SVS until the RM vote lands. Measured cost: first ping after idle
-  **~43 ms vs ~22 ms warm** (a one-packet bump), and cold HTTPS TTFB a
-  stable **0.27–0.29 s** — no micro-stutter. All three knobs are
-  **live-tunable via debugfs** (no rebuild): `…/enable_clock_scaling`,
-  `…/clock_scaling_bw_threshold_nominal_mbps`,
-  `…/clock_scaling_bw_threshold_turbo_mbps`, so A/B against the
-  fixed-NOMINAL baseline takes minutes (`patches/powersave-validate.sh`
-  automates the sampling).
+- **Hardware-tested (X00TD, 2026-06-08).** DL unchanged at ~20 Mbps at
+  **SVS (75 MHz)** under load (73 Mbps peak — IPA is never the bottleneck),
+  no perceptible stutter. The clock node to watch is
+  `/sys/kernel/debug/clk/`**`ipa_clk`** — *not* `ipa_a_clk`, which is the
+  deviceless RPM active-vote handle and reads `2147483647` (INT_MAX), not a
+  real rate. **Power vs latency knob:** active = SVS is the deepest saving;
+  to trade ~half the active core-clock power back for ~5 ms lower latency
+  under load, **lower** `clock_scaling_bw_threshold_nominal` below the
+  [150,250) vote (e.g. to 50) to park active at NOMINAL (150 MHz) instead —
+  measured to give no throughput change either way.
+- **Idle→burst latency — measured OK.** Because idle and active are *both*
+  SVS, there is no SVS→higher ramp on the first packet of a burst (simpler
+  than a NOMINAL default). Measured cold first ping after idle **~43 ms vs
+  ~22 ms warm** (a one-packet bump), cold HTTPS TTFB a stable
+  **0.27–0.29 s** — no micro-stutter. Latency under sustained load was
+  **~37 ms at SVS vs ~31 ms at NOMINAL** (~+5 ms, partly cellular jitter).
+  All three knobs are **live-tunable via debugfs** (no rebuild):
+  `…/enable_clock_scaling`, `…/clock_scaling_bw_threshold_nominal_mbps`,
+  `…/clock_scaling_bw_threshold_turbo_mbps`, so A/B between SVS-active and
+  NOMINAL-active takes minutes (`patches/powersave-validate.sh` automates
+  the sampling).
 - **Coarse, not finely load-following.** The RM perf profile is static, so
-  scaling is effectively **binary — SVS at idle vs NOMINAL when active**,
+  scaling is effectively **binary — gated at idle vs SVS when active**,
   not throughput-proportional. True proportional scaling would need
   IPACM/QMI to update the RM perf profiles at runtime.
 - Leaving the DT pin in place does *not* break the patch (the driver still
@@ -999,10 +1005,13 @@ clock. (The SDM660 v2.6L modem manages its own side of the link, so
 that scale the local IPA core clock are real.)
 
 `patches/sdm660-ipa-port-6.19-powersave.patch` re-couples the RM graph to
-the core clock — `enable_clock_scaling = 1` plus a threshold retune for the
+the core clock with a single change — `enable_clock_scaling = 1`. The
+vendor thresholds (nominal 600 / turbo 1000 Mbps) are kept, so the static
 cellular vote (hardware-measured at an aggregate [150, 250) Mbps — the
-per-resource 100 Mbps profiles sum across the active producers/consumers).
-See **Power-save: dynamic IPA clock scaling** below.
+per-resource 100 Mbps profiles sum across the active producers/consumers)
+never reaches them and active data rides SVS (75 MHz), which measurement
+proved sustains the full link. See **Power-save: dynamic IPA clock
+scaling** below.
 
 If you later need WLAN/USB offload through IPA, the dependency-graph
 traversal in `ipa_rm_dependency_graph.c` and the reference-counted resource

@@ -21,43 +21,44 @@
 
    So this patch is a single localised change in ipa_v2/ipa.c:
      1. enable_clock_scaling = 1   -> RM votes now move the clock.
-     2. Lower the v2.0 bandwidth thresholds (nominal 600->50, turbo
-        1000->250 Mbps). The vendor values target gigabit WLAN offload;
-        with them every check falls through to SVS=75 MHz even under load
-        (the original reason scaling was disabled). HW-measured on X00TD
-        (2026-06-08): the aggregate cellular RM vote lands in [150,250)
-        Mbps -- higher than the ~100 originally assumed. So nominal=50
-        keeps the active vote above NOMINAL, and turbo=250 (above the
-        measured vote ceiling) holds it AT NOMINAL instead of letting it
-        reach TURBO. Result: idle -> SVS=75, active -> NOMINAL=150,
-        TURBO=200 reserved for >250 Mbps (never on cellular). Measured:
-        100 MB DL = 2.51 MB/s (~20 Mbps) at NOMINAL, identical to TURBO,
-        so the 200->150 MHz drop costs zero throughput.
+     2. Keep the v2.0 bandwidth thresholds high (nominal 600, turbo 1000
+        Mbps -- the vendor values, set explicitly) so that even active
+        data parks at SVS = 75 MHz. The base port DISABLED scaling fearing
+        exactly this ("every check falls through to SVS, the slowest"),
+        but HW measurement (X00TD, 2026-06-08) proved the fear unfounded:
+        SVS at 75 MHz sustains the full link -- 100 MB DL = 2.51 MB/s
+        (~20 Mbps), a 73 Mbps peak, IDENTICAL to NOMINAL and TURBO, the
+        cell is the bottleneck not the IPA core clock. The aggregate
+        cellular RM vote measured [150,250) Mbps, far below the 600
+        nominal threshold, so active rides SVS. Net: idle -> gated, any
+        active data -> SVS=75 (half the NOMINAL core-clock power for zero
+        throughput cost), NOMINAL/TURBO effectively unused on cellular.
      3. Boot stays at TURBO (curr_ipa_clk_rate unchanged) for the Q6
         handshake.
 
  RESULTING BEHAVIOUR (HW-measured, X00TD, 2026-06-08)
    - fully idle:        clock gated off    (active-clients refcount, already)
-   - active data:       NOMINAL 150 MHz    (RM vote [150,250) Mbps, turbo=250)
-   - active, unvoted:   SVS 75 MHz         (new idle-ish saving; seen within
-                                            seconds of the vote releasing)
-   - >250 Mbps burst:   TURBO 200 MHz      (unreachable on cellular)
-   Cold-start cost: first packet after idle ~43 ms vs ~22 ms warm (one-packet
-   penalty); cold HTTPS TTFB 0.27-0.29 s, stable -- no perceptible stutter.
+   - active data:       SVS 75 MHz         (RM vote [150,250) << nominal 600)
+   - >600 Mbps:         NOMINAL 150 MHz    (never on cellular)
+   - >1000 Mbps:        TURBO 200 MHz      (never on cellular)
+   100 MB DL at SVS: 2.51 MB/s (~20 Mbps), 73 Mbps peak -- identical to
+   NOMINAL/TURBO. Latency under load ~37 ms vs ~31 ms at NOMINAL (~+5 ms,
+   partly cellular jitter). Cold-start consistent: idle and active are both
+   SVS, so there is no SVS->NOMINAL ramp on the first packet of a burst.
 
  CAVEATS / TUNING
-   - Throughput-proportional scaling needs IPACM/QMI to update the RM perf
-     profiles at runtime. With the static 100 Mbps profile the scaling is
-     coarse (idle-gated vs active-NOMINAL), not finely load-following.
-   - For idle savings to show on the power rail, also drop the board DTS
+   - This is the deepest power-save option (active = SVS = 75 MHz). The
+     cost is ~+5 ms latency under sustained load; throughput is unchanged
+     because the cell, not the IPA core clock, is the bottleneck.
+   - Scaling is coarse: the RM perf profile is static, so the clock is
+     effectively binary -- gated at idle, SVS when active -- not finely
+     load-following (that would need IPACM/QMI to update RM profiles).
+   - For the idle saving to show on the power rail, also drop the board DTS
      "assigned-clock-rates = <200000000>" pin so the driver owns the rate.
-   - Hardware-tested on X00TD (2026-06-08): DL unchanged at ~20 Mbps,
-     scaling confirmed dynamic (SVS idle <-> NOMINAL active), no stutter.
-     If you re-tune: to keep active out of SVS, lower
-     clock_scaling_bw_threshold_nominal (raising it enlarges the SVS
-     region and makes it worse). turbo=250 deliberately parks active at
-     NOMINAL; lower it toward 150 only if you WANT active to ride TURBO
-     (200 MHz) -- measured to give no extra throughput here.
+   - To trade a little power back for latency/headroom, lower
+     clock_scaling_bw_threshold_nominal below the [150,250) vote (e.g. 50)
+     to park active at NOMINAL (150 MHz) instead -- measured to cut warm
+     latency ~5 ms at 2x the active core-clock power, no throughput gain.
 
  Generated: 2026-06-04
 ================================================================
@@ -85,40 +86,40 @@
 +	 * the clock when enable_clock_scaling is set; with it cleared the engine
 +	 * pinned NOMINAL (150 MHz) and the RM votes were inert. Re-enabling it
 +	 * couples the RM graph to the core clock: gated off when idle (active-
-+	 * clients refcount), SVS (75 MHz) when active-but-unvoted, NOMINAL/TURBO
-+	 * under the RM bandwidth vote.
++	 * clients refcount) and SVS (75 MHz) whenever active — the static
++	 * cellular RM vote never reaches the NOMINAL/TURBO thresholds.
  	 *
 -	 * With scaling disabled, ipa2_set_clock_plan_from_pm() lands in the
 -	 * else-branch that pins needed_voltage = IPA_VOLTAGE_NOMINAL (150 MHz).
 -	 * curr_ipa_clk_rate is still initialised to TURBO here, so init paths
 -	 * see full bandwidth before NOMINAL takes over.
-+	 * Threshold retune. The vendor v2.0 thresholds (nominal 600 / turbo
-+	 * 1000 Mbps) target gigabit WLAN-offload, so every check fell through to
-+	 * SVS = 75 MHz even under load — exactly why scaling was disabled.
-+	 * HW-measured on X00TD (2026-06-08): the aggregate cellular RM vote sits
-+	 * in [150,250) Mbps, higher than the ~100 first assumed. So nominal=50
-+	 * keeps the active vote clear of SVS, and turbo=250 (above the measured
-+	 * vote ceiling) parks active AT NOMINAL (150 MHz) rather than TURBO. A
-+	 * 100 MB DL ran at 2.51 MB/s (~20 Mbps) at NOMINAL — identical to TURBO,
-+	 * so the 200->150 MHz drop is free. SVS stays for idle, TURBO (200) is
-+	 * reserved for >250 Mbps and never reached on cellular. Tune: lower
-+	 * nominal to keep active out of SVS; lower turbo toward 150 only to let
-+	 * active ride TURBO (no measured throughput gain here).
++	 * Thresholds. Keep the vendor v2.0 values (nominal 600 / turbo 1000
++	 * Mbps), set explicitly so the intent survives a vendor default change.
++	 * The base port disabled scaling fearing these "always fall through to
++	 * SVS = 75 MHz even under load" — but HW measurement (X00TD, 2026-06-08)
++	 * proved that is exactly what we WANT: SVS sustains the full link. The
++	 * aggregate cellular RM vote measured [150,250) Mbps, far below the 600
++	 * nominal threshold, so active data rides SVS. A 100 MB DL at SVS ran
++	 * 2.51 MB/s (~20 Mbps) with a 73 Mbps peak — identical to NOMINAL and
++	 * TURBO; the cell, not the 75 MHz core clock, is the bottleneck. So
++	 * active = SVS halves the active core-clock power for zero throughput
++	 * cost (~+5 ms latency under load, partly cellular jitter). To trade
++	 * that back, lower nominal below 150 to park active at NOMINAL instead.
 +	 *
 +	 * curr_ipa_clk_rate stays initialised to TURBO so the boot / Q6 handshake
 +	 * runs at full clock before the RM-driven profile takes over.
 +	 *
 +	 * NOTE: throughput-proportional scaling needs IPACM/QMI to update the RM
 +	 * perf profiles at runtime; with the static profile the scaling is coarse
-+	 * (binary: SVS idle vs NOMINAL active, not load-following). For idle
-+	 * savings to show on the rail, also drop the board DTS
++	 * (binary: gated at idle vs SVS when active, not load-following). For
++	 * idle savings to show on the rail, also drop the board DTS
 +	 * "assigned-clock-rates = <200000000>" pin so the driver — not RPM —
 +	 * owns the rate.
  	 */
 -	ipa_ctx->enable_clock_scaling = 0;
 +	ipa_ctx->enable_clock_scaling = 1;
-+	ipa_ctx->ctrl->clock_scaling_bw_threshold_nominal = 50;
-+	ipa_ctx->ctrl->clock_scaling_bw_threshold_turbo = 250;
++	ipa_ctx->ctrl->clock_scaling_bw_threshold_nominal = 600;
++	ipa_ctx->ctrl->clock_scaling_bw_threshold_turbo = 1000;
  	ipa_ctx->curr_ipa_clk_rate = ipa_ctx->ctrl->ipa_clk_rate_turbo;
  
  	/* enable IPA clocks explicitly to allow the initialization */
