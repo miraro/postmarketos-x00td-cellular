@@ -50,6 +50,15 @@
    - This is the deepest power-save option (active = SVS = 75 MHz). The
      cost is ~+5 ms latency under sustained load; throughput is unchanged
      because the cell, not the IPA core clock, is the bottleneck.
+   - VALIDATED FOR ~20 Mbps CELLULAR. SVS was measured to pass at least
+     73 Mbps (a burst peak), but its true ceiling above that is UNTESTED.
+     Because scaling is coarse (next bullet) the clock will NOT auto-bump
+     for a faster link -- it stays SVS regardless. So on a fast link
+     (good signal + CA can hit 100+ Mbps on this modem) SVS could cap
+     throughput at ~its ceiling. Fast-link users should verify with
+     powersave-validate.sh + a real DL, or set nominal=50 to park active
+     at NOMINAL (150 MHz, ~2x the SVS headroom), or skip the patch (keep
+     the 200 MHz DT pin) for guaranteed full bandwidth.
    - Scaling is coarse: the RM perf profile is static, so the clock is
      effectively binary -- gated at idle, SVS when active -- not finely
      load-following (that would need IPACM/QMI to update RM profiles).

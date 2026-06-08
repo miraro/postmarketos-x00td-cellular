@@ -696,6 +696,18 @@ patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch
   under load, **lower** `clock_scaling_bw_threshold_nominal` below the
   [150,250) vote (e.g. to 50) to park active at NOMINAL (150 MHz) instead —
   measured to give no throughput change either way.
+- **⚠ Validated for ~20 Mbps cellular — fast links need a check.** SVS was
+  measured to pass *at least* 73 Mbps (a burst peak), but its true ceiling
+  above that is **untested**. And because scaling is coarse (see below) the
+  clock **does not auto-bump for a faster link** — it stays at SVS no matter
+  the actual rate. So on a fast link (good signal + carrier aggregation can
+  reach 100+ Mbps on this modem) SVS-active could cap throughput at roughly
+  its ceiling. If your link regularly exceeds ~70 Mbps, either **verify**
+  with `powersave-validate.sh` + a real DL, **set `nominal=50`** to park
+  active at NOMINAL (150 MHz — about double the SVS headroom), or **skip the
+  patch** (keep the 200 MHz DT pin) for guaranteed full bandwidth. The
+  shipped SVS default is tuned for the typical X00TD cellular case, not for
+  a saturated fast link.
 - **Idle→burst latency — measured OK.** Because idle and active are *both*
   SVS, there is no SVS→higher ramp on the first packet of a burst (simpler
   than a NOMINAL default). Measured cold first ping after idle **~43 ms vs
