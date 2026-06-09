@@ -113,6 +113,38 @@ Single module (`ipa-driver.ko`), so no `EXPORT_SYMBOL` — a prototype in
   single-module / `insmod` netdev-creation fragility that defanged SSR).
 - Does **not** call SSR.
 
+## Relationship to SSR (two independent triggers, not a sequence)
+
+This recovery does **not** replace, wrap, or sequence with SSR. The two are
+separate mechanisms on different triggers, and the SSR path
+(`ssr_notifier_cb`) is left untouched by this patch:
+
+| Mechanism | Trigger | Recovers |
+|---|---|---|
+| This AP-local recovery | netdev **watchdog** (`tx_timeout`, ~1 s of a stuck queue) | lost-EOT (AP-side) stall |
+| SSR | **modem** subsystem-restart notifications (`SUBSYS_*`) | a real modem crash/restart |
+
+The only coupling is in `ipa_wwan_tx_timeout()`:
+
+- **SSR in progress** (`is_ssr` set) -> the watchdog **stands down**
+  (`return`) and lets SSR own the reset. Ours yields *to* SSR, it does not
+  run before it.
+- **No modem crash** (the common case) -> SSR is never triggered; only this
+  recovery runs. It either fixes a lost-EOT stall or, after
+  `IPA_TX_STALL_GIVEUP` (~20 s) of no progress on a modem-side stall, stops
+  and leaves the rest to SSR/reboot.
+
+So the only sense in which "ours goes first" is for the AP-recoverable case:
+we try for ~20 s, and only what we *cannot* fix (a genuine modem-side hang)
+falls through to SSR/reboot. It is not an ordered fallback on one trigger —
+each handles its own case, and ours yields where they overlap.
+
+Caveat: on mainline q6v5 the SSR path is largely unreliable / defanged (see
+the main doc — `is_ssr` was removed because it got stuck; `AFTER_POWERUP` is
+not reliably emitted). In practice, for the common AP-side stall this
+recovery is the only thing that actually runs; SSR as a backstop is mostly
+theoretical until that path is fixed on mainline.
+
 ## Resolved implementation questions
 
 All three were reviewed against the code; the current patch is correct and
