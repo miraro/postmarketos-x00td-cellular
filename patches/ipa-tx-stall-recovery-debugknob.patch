@@ -1,0 +1,83 @@
+================================================================
+ DEBUG add-on: manual kick knob for TX-stall recovery safety test
+================================================================
+
+ TEST-ONLY. Apply ON TOP OF the recovery patch:
+
+   patch -p1 < patches/ipa-tx-stall-recovery.patch
+   patch -p1 < patches/ipa-tx-stall-recovery-debugknob.patch   # <-- this
+
+ NEVER ship a production build with this exercised. It exists purely to
+ run validation step S8.2 of patches/ipa-tx-stall-recovery.DESIGN.md.
+
+ WHAT IT DOES
+   Adds a module_param_cb "tx_stall_kick" to ipa-driver.ko. Writing 1
+   fires one ipa2_tx_dp_kick_stalled_pipe(IPA_CLIENT_APPS_LAN_WAN_PROD)
+   by hand; reading the param returns the last kick's rc.
+
+ HOW TO RUN THE SAFETY TEST (on device, as root)
+   # start a sustained UL load in another shell, then:
+   echo 1 > /sys/module/ipa_driver/parameters/tx_stall_kick
+   dmesg | grep TX_STALL_KICK
+   cat /sys/module/ipa_driver/parameters/tx_stall_kick   # last rc
+
+   rc legend: 1 = harvest armed, 0 = already polling, <0 = error.
+
+ PASS CRITERION
+   The device stays up. Reaching the "[TX_STALL_KICK] manual kick -> rc="
+   log line at all -- no hard power-off -- proves the harvest path
+   (sps_get_iovec on our own BAM pipe) never crosses the XPU/TrustZone
+   boundary, i.e. it is genuinely AP-local. A hard reset would mean the
+   path touches modem-owned state and the recovery is unsafe.
+
+ Generated: 2026-06-09
+================================================================
+
+--- a/drivers/platform/msm/ipa/ipa_v2/rmnet_ipa.c
++++ b/drivers/platform/msm/ipa/ipa_v2/rmnet_ipa.c
+@@ -90,6 +90,45 @@
+ 	"Enable QMAPv3 UL on EGRESS pipe 4 (hdr_len=8 + cs_offload_en=UL). "
+ 	"Default 0 (QMAPv1 UL, proven-working). 1 = vendor-parity UL QMAPv3 "
+ 	"(experimental — needs vendor-init WDA_UL_PROTO=7 + egress-mapv4-checksum on)");
++
++/* DEBUG / TEST-ONLY safety knob for the AP-local TX-stall recovery.
++ * Writing 1 fires one ipa2_tx_dp_kick_stalled_pipe() by hand so you can
++ * confirm on real hardware that the harvest path (sps_get_iovec on our own
++ * BAM pipe) does NOT trip the XPU/TrustZone boundary -- i.e. no hard
++ * power-off. Reading the param returns the last kick's rc (1 = harvest
++ * armed, 0 = already polling, <0 = error). Never ship a build with this
++ * exercised in production. See patches/ipa-tx-stall-recovery.DESIGN.md S8.2.
++ */
++static int tx_stall_kick_last_rc = -2;	/* -2 = never fired */
++
++static int tx_stall_kick_set(const char *val, const struct kernel_param *kp)
++{
++	int v, rc;
++
++	if (kstrtoint(val, 0, &v) || v == 0)
++		return 0;
++	rc = ipa2_tx_dp_kick_stalled_pipe(IPA_CLIENT_APPS_LAN_WAN_PROD);
++	tx_stall_kick_last_rc = rc;
++	pr_err("[TX_STALL_KICK] manual kick -> rc=%d (1=armed,0=already-polling,<0=err); reaching here (no hard-reset) proves the path is AP-local\n",
++	       rc);
++	return 0;
++}
++
++static int tx_stall_kick_get(char *buffer, const struct kernel_param *kp)
++{
++	return scnprintf(buffer, PAGE_SIZE, "%d\n", tx_stall_kick_last_rc);
++}
++
++static const struct kernel_param_ops tx_stall_kick_ops = {
++	.set = tx_stall_kick_set,
++	.get = tx_stall_kick_get,
++};
++module_param_cb(tx_stall_kick, &tx_stall_kick_ops, NULL, 0644);
++MODULE_PARM_DESC(tx_stall_kick,
++	"DEBUG/TEST-ONLY: write 1 to fire one AP-local Tx-stall harvest kick "
++	"(safety test for XPU-boundary); read back the last rc. Do not ship "
++	"enabled.");
++
+ static struct workqueue_struct *ipa_rm_q6_workqueue; /* IPA_RM workqueue*/
+ static atomic_t is_initialized;
+ static atomic_t is_ssr;
