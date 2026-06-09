@@ -145,6 +145,31 @@ not reliably emitted). In practice, for the common AP-side stall this
 recovery is the only thing that actually runs; SSR as a backstop is mostly
 theoretical until that path is fixed on mainline.
 
+### Does this recovery even get a chance to run? Yes.
+
+The worry: the vendor "went straight to SSR", so could an SSR pre-empt our
+watchdog and stop it ever running? No — verified two ways:
+
+- **Nothing in the port initiates SSR from a data stall.** The IPA/rmnet
+  code only *registers* for SSR notifications
+  (`qcom_register_ssr_notifier("mpss", &ssr_notifier)`); it never calls
+  `subsystem_restart`. SSR is triggered only externally, by the modem
+  actually crashing (q6v5/remoteproc). A lost-EOT (AP-side) stall does not
+  crash the modem, so no SSR fires and nothing competes with the watchdog.
+- **`is_ssr` is never set to 1 in this port** (the only writes are
+  `atomic_set(&is_ssr, 0)`; the `=1` in `BEFORE_SHUTDOWN` was removed
+  because it got stuck). So the `is_ssr` guard in `ipa_wwan_tx_timeout()`
+  is currently dormant and the recovery runs on *every* watchdog fire.
+
+The vendor's "straight to SSR" was really: its `tx_timeout` did nothing,
+and data-stall recovery in the full Android stack came from userspace
+(netmgrd/IPACM data-stall detection -> modem restart over QMI) or the modem
+self-crashing. A bare port has none of that, so without this patch an
+AP-side stall has *zero* in-system recovery (reboot only). This recovery is
+the sole responder, with a clear runway. The `is_ssr` guard is kept as
+forward-compat: if the SSR path is fixed on mainline and `is_ssr` becomes
+live again, the recovery will correctly stand down during an SSR.
+
 ## Resolved implementation questions
 
 All three were reviewed against the code; the current patch is correct and
