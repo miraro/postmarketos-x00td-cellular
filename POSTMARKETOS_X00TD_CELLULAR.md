@@ -726,6 +726,15 @@ patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch
 - Leaving the DT pin in place does *not* break the patch (the driver still
   scales via `clk_set_rate`), but the rail won't drop at idle and the pin
   is misleading — hence the overlay.
+- **Rail power saving (mW) is unmeasured — future work.** Only the
+  clock-domain behaviour (idle gating + SVS-active) and throughput/latency
+  were validated on HW; the *absolute* draw delta on the battery rail was
+  not. Measuring it needs the device **discharging** (USB/charger off, so a
+  WiFi shell) plus a long `qcom-battery/current_now` average per clock state,
+  and the IPA core-clock delta on a single IP block may sit near the
+  fuel-gauge noise floor. Treat the DT-pin drop as **opt-in for real
+  deployment**; it is not required for the validated clock/throughput
+  behaviour above.
 
 ---
 

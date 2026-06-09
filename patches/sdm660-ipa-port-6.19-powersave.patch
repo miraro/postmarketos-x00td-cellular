@@ -64,6 +64,11 @@
      load-following (that would need IPACM/QMI to update RM profiles).
    - For the idle saving to show on the power rail, also drop the board DTS
      "assigned-clock-rates = <200000000>" pin so the driver owns the rate.
+   - The rail power delta (mW) is UNMEASURED — only the clock-domain
+     behaviour (gating + SVS-active) and throughput/latency were validated
+     on HW. The absolute saving on the battery rail is future work (needs a
+     discharging device + long current_now averaging); the IPA core-clock
+     delta on one IP block may be near the fuel-gauge noise floor.
    - To trade a little power back for latency/headroom, lower
      clock_scaling_bw_threshold_nominal below the [150,250) vote (e.g. 50)
      to park active at NOMINAL (150 MHz) instead -- measured to cut warm

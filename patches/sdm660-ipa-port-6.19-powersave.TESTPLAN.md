@@ -21,6 +21,11 @@ result below; keep it for re-validation after kernel bumps.
 > - No floor-clamp (verified in code: RM resources created with
 >   `floor_voltage=0`/UNSPECIFIED), so thresholds fully control the state and
 >   active-SVS is reachable.
+> - **NOT measured: the rail power delta (mW).** Only clock-domain behaviour
+>   + throughput + latency were validated. Measuring the absolute battery-rail
+>   saving is future work — needs a *discharging* device (charger/USB off → a
+>   WiFi shell) and a long `qcom-battery/current_now` average per clock state;
+>   the single-IP-block delta may be near the fuel-gauge noise floor.
 >
 > **Default shipped: `nominal=600, turbo=1000` (vendor values, kept) →
 > idle gated, active SVS (75 MHz) — the deepest power-save.** NOMINAL/TURBO
