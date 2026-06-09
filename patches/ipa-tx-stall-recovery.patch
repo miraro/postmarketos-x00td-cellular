@@ -1,0 +1,245 @@
+================================================================
+ IPA v2.6L — AP-local TX-stall recovery (rmnet watchdog harvest)
+================================================================
+
+ Incremental, opt-in patch. Apply ON TOP OF the 6.19 IPA port:
+
+   patch -p1 < patches/sdm660-ipa-port-4.19-to-6.19.nosondy.patch
+   patch -p1 < patches/ipa-tx-stall-recovery.patch          # <-- this
+
+ Full rationale: patches/ipa-tx-stall-recovery.DESIGN.md
+
+ WHAT IT DOES
+   Turns the inert UL TX-stall watchdog into a real, bounded, AP-local
+   recovery. Today ipa_wwan_tx_timeout() only logs "data stall in UL"
+   (faithfully copied from vendor, which leans on SSR for recovery). On
+   mainline q6v5 the SSR chain is unreliable and the port deliberately
+   defanged the is_ssr path (re-registering the single ipa-driver.ko
+   across SSR broke rmnet_ipa0 creation under insmod), so a lost SPS EOT
+   can freeze uplink permanently until reboot.
+
+ THE STALL (self-deadlock)
+   A lost/coalesced SPS EOT on the egress pipe (APPS_LAN_WAN_PROD) means
+   ipa_sps_irq_tx_notify() never runs -> completed descriptors are not
+   harvested -> outstanding_pkts stays at the high watermark (64) ->
+   ipa_wwan_xmit() calls netif_stop_queue() -> no new TX -> no new EOT ->
+   the harvest is never re-armed. The netdev watchdog (watchdog_timeo =
+   1000 ms) then fires ipa_wwan_tx_timeout().
+
+ THE FIX
+   ipa2_tx_dp_kick_stalled_pipe() (ipa_dp.c) replicates the SPS_EVENT_EOT
+   branch of ipa_sps_irq_tx_notify() for the egress client: vote the IPA
+   clock, switch the pipe to POLL mode, set curr_polling_state and queue
+   sys->work -> ipa_handle_tx() -> sps_get_iovec() harvest -> each packet
+   completion callback decrements outstanding_pkts and wakes the queue.
+   outstanding_pkts drops NATURALLY, one per genuinely-completed
+   descriptor -- no manual counter reset, so no underflow.
+
+   ipa_wwan_tx_timeout() (rmnet_ipa.c) schedules the harvest out of timer
+   context, tracks progress across ticks, logs "modem-side, not AP-
+   recoverable" after IPA_TX_STALL_MODEM_THRESH no-progress kicks, and
+   stops kicking after IPA_TX_STALL_GIVEUP (await SSR/reboot). A genuine
+   completion clears the backoff.
+
+ WHY IT IS SAFE
+   sps_get_iovec() reads only the AP's own BAM pipe descriptor FIFO. It
+   never touches modem-owned IPA state, so it cannot cross the XPU /
+   TrustZone boundary (any AP poke at modem state hard-resets a fuse-blown
+   retail device). The same action recovers a lost-EOT (AP-side) stall and
+   is a harmless no-op for a modem-side one -- no detection needed.
+
+ NON-GOALS
+   - does not touch modem-owned state (XPU-safe)
+   - does not reset/zero outstanding_pkts (no underflow)
+   - does not (un)register the driver or netdev (single-module/insmod safe)
+   - does not call SSR
+
+ Single module (ipa-driver.ko), so the new ipa_dp.c symbol needs only a
+ prototype in ipa_i.h, no EXPORT_SYMBOL.
+
+ Generated: 2026-06-09
+================================================================
+
+--- a/drivers/platform/msm/ipa/ipa_v2/ipa_i.h
++++ b/drivers/platform/msm/ipa/ipa_v2/ipa_i.h
+@@ -1578,6 +1578,12 @@
+ int ipa2_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
+ 		struct ipa_tx_meta *metadata);
+ 
++/* AP-local Tx-stall recovery: re-arm the completion harvest for an egress
++ * client whose SPS EOT was lost (called from the rmnet TX watchdog). See
++ * patches/ipa-tx-stall-recovery.DESIGN.md.
++ */
++int ipa2_tx_dp_kick_stalled_pipe(enum ipa_client_type dst);
++
+ /*
+  * To transfer multiple data packets
+  * While passing the data descriptor list, the anchor node
+--- a/drivers/platform/msm/ipa/ipa_v2/ipa_dp.c
++++ b/drivers/platform/msm/ipa/ipa_v2/ipa_dp.c
+@@ -294,6 +294,83 @@
+ }
+ 
+ /**
++ * ipa2_tx_dp_kick_stalled_pipe() - re-arm the Tx completion harvest for an
++ * egress client whose SPS EOT interrupt was lost.
++ *
++ * Replicates the SPS_EVENT_EOT branch of ipa_sps_irq_tx_notify() for @dst's
++ * system pipe. Called from the rmnet TX watchdog when the queue has stalled
++ * because outstanding_pkts is stuck at the high watermark: no EOT arrived to
++ * drain completed descriptors, so no harvest was scheduled, and with the
++ * queue stopped no further TX can produce a new EOT (a self-deadlock).
++ *
++ * AP-local: the harvest (ipa_handle_tx -> sps_get_iovec) only polls our own
++ * BAM pipe descriptor FIFO; it never touches modem-owned IPA state, so it
++ * cannot trip the XPU/TrustZone boundary. If the descriptors are genuinely
++ * complete (a lost EOT) the harvest drains them, decrements outstanding_pkts
++ * via each packet's completion callback, and wakes the queue. If the stall
++ * is modem-side (nothing completed) the harvest finds nothing and the pipe
++ * is left untouched.
++ *
++ * Return: 1 if a harvest was armed, 0 if a poll was already in progress,
++ * negative errno otherwise.
++ */
++int ipa2_tx_dp_kick_stalled_pipe(enum ipa_client_type dst)
++{
++	struct ipa_sys_context *sys;
++	int ipa_ep_idx;
++	int ret;
++
++	ipa_ep_idx = ipa2_get_ep_mapping(dst);
++	if (ipa_ep_idx == -1) {
++		IPAERR("invalid client %d\n", dst);
++		return -EINVAL;
++	}
++	if (!ipa_ctx->ep[ipa_ep_idx].valid) {
++		IPAERR("client %d pipe not set up\n", dst);
++		return -ENODEV;
++	}
++	sys = ipa_ctx->ep[ipa_ep_idx].sys;
++	if (!sys) {
++		IPAERR("client %d has no sys context\n", dst);
++		return -ENODEV;
++	}
++
++	/* The IPA clock may be gated (idle) when the watchdog fires; vote it
++	 * on for the reconfig. ipa_handle_tx() (queued below) takes its own
++	 * vote for the harvest itself.
++	 */
++	IPA_ACTIVE_CLIENTS_INC_SIMPLE();
++
++	/* A real EOT raced us and is already harvesting -- nothing to do. */
++	if (atomic_read(&sys->curr_polling_state)) {
++		IPA_ACTIVE_CLIENTS_DEC_SIMPLE();
++		return 0;
++	}
++
++	/* Same handshake ipa_sps_irq_tx_notify() runs on SPS_EVENT_EOT:
++	 * switch the pipe to POLL mode and arm the deferred harvest.
++	 */
++	ret = sps_get_config(sys->ep->ep_hdl, &sys->ep->connect);
++	if (ret) {
++		IPAERR("sps_get_config() failed %d\n", ret);
++		goto done;
++	}
++	sys->ep->connect.options =
++		SPS_O_AUTO_ENABLE | SPS_O_ACK_TRANSFERS | SPS_O_POLL;
++	ret = sps_set_config(sys->ep->ep_hdl, &sys->ep->connect);
++	if (ret) {
++		IPAERR("sps_set_config() failed %d\n", ret);
++		goto done;
++	}
++	atomic_set(&sys->curr_polling_state, 1);
++	queue_work(sys->wq, &sys->work);
++	ret = 1;
++done:
++	IPA_ACTIVE_CLIENTS_DEC_SIMPLE();
++	return ret;
++}
++
++/**
+  * ipa_send_one() - Send a single descriptor
+  * @sys:	system pipe context
+  * @desc:	descriptor to send
+--- a/drivers/platform/msm/ipa/ipa_v2/rmnet_ipa.c
++++ b/drivers/platform/msm/ipa/ipa_v2/rmnet_ipa.c
+@@ -45,6 +45,10 @@
+ #define DEFAULT_OUTSTANDING_HIGH 64
+ #define DEFAULT_OUTSTANDING_LOW 32
+ 
++/* AP-local TX-stall recovery -- see patches/ipa-tx-stall-recovery.DESIGN.md */
++#define IPA_TX_STALL_MODEM_THRESH 5  /* consecutive no-progress kicks => modem-side */
++#define IPA_TX_STALL_GIVEUP      20  /* stop kicking a dead modem; await SSR/reboot */
++
+ #define IPA_WWAN_DEV_NAME "rmnet_ipa%d"
+ #define IPA_UPSTEAM_WLAN_IFACE_NAME "wlan0"
+ #define IPA_UPSTEAM_WLAN1_IFACE_NAME "wlan1"
+@@ -1256,9 +1260,59 @@
+ 	return ret;
+ }
+ 
++/* TX-stall recovery state (AP-local watchdog harvest). */
++static int tx_stall_fails;		/* consecutive no-progress kicks */
++static int tx_stall_last_outstanding;	/* outstanding_pkts at the last kick */
++
++static void ipa_tx_stall_recover(struct work_struct *work)
++{
++	struct net_device *dev = ipa_netdevs[0];
++	struct wwan_private *wwan_ptr;
++	int before, rc;
++
++	if (!dev)
++		return;
++	wwan_ptr = netdev_priv(dev);
++	before = atomic_read(&wwan_ptr->outstanding_pkts);
++
++	/* AP-local: re-arm the Tx harvest the lost EOT would have run. Drains
++	 * any completed descriptors (decrementing outstanding_pkts via each
++	 * packet's completion callback and waking the queue); a harmless no-op
++	 * if the stall is modem-side. Never touches modem state -> no XPU/
++	 * hard-reset risk.
++	 */
++	rc = ipa2_tx_dp_kick_stalled_pipe(IPA_CLIENT_APPS_LAN_WAN_PROD);
++
++	/* The harvest is asynchronous; gauge progress against the previous
++	 * tick's count to back off on a genuine (modem-side) stall.
++	 */
++	if (rc == 1 && before == tx_stall_last_outstanding)
++		tx_stall_fails++;
++	else
++		tx_stall_fails = 0;
++	tx_stall_last_outstanding = before;
++
++	if (tx_stall_fails == 1 || (tx_stall_fails % 10) == 0)
++		IPAWANERR("[%s] UL stall: armed Tx harvest (outstanding=%d fails=%d)%s\n",
++			dev->name, before, tx_stall_fails,
++			tx_stall_fails >= IPA_TX_STALL_MODEM_THRESH ?
++			" -- looks modem-side, not AP-recoverable" : "");
++}
++
++static DECLARE_WORK(ipa_tx_stall_work, ipa_tx_stall_recover);
++
+ static void ipa_wwan_tx_timeout(struct net_device *dev, unsigned int txqueue)
+ {
+ 	IPAWANERR("[%s]:[%s] data stall in UL\n", __func__, dev->name);
++
++	/* SSR owns recovery while it runs; and stop hammering a dead modem. */
++	if (atomic_read(&is_ssr))
++		return;
++	if (tx_stall_fails >= IPA_TX_STALL_GIVEUP)
++		return;
++
++	/* Defer the harvest out of this timer context. */
++	schedule_work(&ipa_tx_stall_work);
+ }
+ 
+ /**
+@@ -1309,6 +1363,8 @@
+ 
+ 	wwan_ptr = netdev_priv(dev);
+ 	atomic_dec(&wwan_ptr->outstanding_pkts);
++	if (tx_stall_fails)		/* genuine completion -> clear stall backoff */
++		tx_stall_fails = 0;
+ 	__netif_tx_lock_bh(netdev_get_tx_queue(dev, 0));
+ 	if (!atomic_read(&is_ssr) &&
+ 		netif_queue_stopped(wwan_ptr->net) &&
