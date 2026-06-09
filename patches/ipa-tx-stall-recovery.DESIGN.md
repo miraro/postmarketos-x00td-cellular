@@ -161,14 +161,31 @@ watchdog and stop it ever running? No — verified two ways:
   because it got stuck). So the `is_ssr` guard in `ipa_wwan_tx_timeout()`
   is currently dormant and the recovery runs on *every* watchdog fire.
 
-The vendor's "straight to SSR" was really: its `tx_timeout` did nothing,
-and data-stall recovery in the full Android stack came from userspace
-(netmgrd/IPACM data-stall detection -> modem restart over QMI) or the modem
-self-crashing. A bare port has none of that, so without this patch an
-AP-side stall has *zero* in-system recovery (reboot only). This recovery is
-the sole responder, with a clear runway. The `is_ssr` guard is kept as
-forward-compat: if the SSR path is fixed on mainline and `is_ssr` becomes
-live again, the recovery will correctly stand down during an SSR.
+The vendor's "straight to SSR" was really: its `tx_timeout` did nothing.
+Verified against the 4.19 vendor baseline — its `ipa_wwan_tx_timeout()` is
+the same inert log, and all three of its queue-wake paths are flow-control,
+not stall recovery: the TX-complete callback (dead if completions stop
+arriving — our exact stall), `ipa_tx_wakequeue_work` (fired by
+`ipa_rm_resource_granted()`, i.e. the IPA_RM acquisition window), and the
+runtime-PM resume callback. None recovers a lost EOT.
+
+So *nothing at this layer* handled the stall, vendor included. Note IPACM
+does not either — its job is IPA rule/filter/NAT/offload management, not
+BAM-pipe TX-stall recovery (its source is not in this repo; this is from
+its architectural role, not a code read). The "data stall recovery" people
+associate with the Android stack lives a layer up and far coarser: the
+telephony framework's `DataStallRecoveryManager` / connectivity validation
+detects *end-to-end* "no data" over tens of seconds to minutes and recovers
+by bearer/radio reset, and the modem's own watchdogs self-crash into SSR —
+neither catches a 1-second lost-EOT on a BAM pipe, and both are absent on a
+bare port anyway.
+
+Net: without this patch an AP-side lost-EOT stall has *zero* in-system
+recovery (reboot only). This recovery is the sole responder at this layer,
+with a clear runway — not a re-implementation of an existing mechanism. The
+`is_ssr` guard is kept as forward-compat: if the SSR path is fixed on
+mainline and `is_ssr` becomes live again, the recovery will correctly stand
+down during an SSR.
 
 ## Resolved implementation questions
 
