@@ -113,18 +113,41 @@ Single module (`ipa-driver.ko`), so no `EXPORT_SYMBOL` — a prototype in
   single-module / `insmod` netdev-creation fragility that defanged SSR).
 - Does **not** call SSR.
 
-## Open implementation questions
+## Resolved implementation questions
+
+All three were reviewed against the code; the current patch is correct and
+needs no change. Kept here with the reasoning so they are not re-opened.
 
 1. **Clock-vote window** between `queue_work` and `ipa_handle_tx` (both
-   vote): accept the brief gap (reconfig under our vote, harvest under the
-   work's vote) vs. hold a ref across the kick. Current patch accepts the
-   gap — the pipe is in POLL mode with `curr_polling_state = 1` meanwhile,
-   so no harvest runs until the work re-votes.
-2. **Race with a real EOT notify**: the `curr_polling_state` atomic guard
-   makes it idempotent (same as the vendor notify, which is also lock-free
-   here). Revisit if a stricter `sys->spinlock` is wanted.
-3. **`netif_trans_update` after a kick**: rely on the fail-counter backoff
-   rather than touching the trans timestamp, to avoid masking a real stall.
+   vote) — **RESOLVED: keep as-is.** `ipa_handle_tx()` takes its own
+   `IPA_ACTIVE_CLIENTS_INC_SIMPLE()` (ipa_dp.c) *before* any HW access, so
+   no register/SPS touch ever happens on a gated clock. The reconfig runs
+   under our vote; the harvest under the work's vote. The only effect of
+   the brief gap is a possibly-redundant clock flap in an already-rare
+   path (and during a real stall the IPA_RM/inactivity vote tends to hold
+   the clock on anyway). Our `INC`/`DEC` is balanced — no leak.
+2. **Race with a real EOT notify** — **RESOLVED: the lock-free
+   `curr_polling_state` atomic guard is sufficient; no `sys->spinlock`
+   needed.** Verified three ways:
+   - `sps_set_config()` / `sps_get_iovec()` serialize per pipe inside the
+     SPS driver via `sps_bam_lock()` ->
+     `spin_lock_irqsave(&bam->connection_lock)` (`drivers/platform/msm/sps/sps.c`),
+     so two concurrent reconfigs cannot corrupt the pipe — the second just
+     re-applies the same POLL config.
+   - `sys->work` is non-reentrant (the workqueue API runs a given
+     `work_struct` on only one CPU at a time), and `queue_work()` collapses
+     or serializes a duplicate, so two `ipa_handle_tx()` never run
+     concurrently on one pipe.
+   - the `head_desc_list` pop in `ipa_wq_write_done_common()` is under
+     `sys->spinlock` and in-order, so each descriptor is freed exactly once
+     even if a real harvest and our kick interleave.
+   This matches the vendor notify, which is also lock-free here.
+3. **`netif_trans_update` after a kick** — **RESOLVED: do not touch the
+   trans timestamp.** Letting the watchdog re-fire every `watchdog_timeo`
+   (1 s) while stalled is the intended behaviour: it keeps re-arming the
+   harvest, is bounded by `IPA_TX_STALL_GIVEUP` (~20 s) and rate-limited in
+   logging, and does not mask the stall. Updating the timestamp would hide
+   a genuine stall from the watchdog.
 
 ## Validation
 
