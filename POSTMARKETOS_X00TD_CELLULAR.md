@@ -1229,6 +1229,15 @@ under a real tethering load shows the CPU actually saturating; reach for
 true IPA BAM-to-BAM only if the target is 100+ Mbps tethering, which is
 above this link's ceiling.
 
+Unlike the BAM-to-BAM path, this option *is* actionable today: it needs
+no kernel changes and no reflash. The concrete next step is a short
+nftables flowtable ruleset bridging `usb0 ↔ qmapmux0.0` plus an
+on-device A/B of CPU load (`top` / `/proc/interrupts` / thermal zone)
+during a real tethering pull, with and without the flowtable, to confirm
+the per-packet saving is real before committing it. That measurement,
+not more analysis, is what decides whether USB tethering needs any
+offload at all on this port.
+
 ---
 
 ## Running under ModemManager (alternative path, partly untested)
