@@ -768,6 +768,23 @@ multiple TCP flows — plenty for normal cellular use.
 The kernel and `vendor-init` opt-in machinery is in place if anyone
 wants to dig further.
 
+**Refuted hypothesis — it is *not* a BAM 4-byte DMA-padding problem.**
+A tempting theory is that the QMAPv3 csum header makes `skb->len`
+non-divisible-by-4, so the BAM TX engine sends a truncated burst the
+modem can't decode. The code refutes this two ways: (1) mainline QMAP
+pads *every* frame to a 4-byte boundary regardless of version —
+`rmnet_map_data.c` does `padding = ALIGN(map_datalen, 4) - map_datalen`
+and records the count in `map_header->flags` — and the UL csum header is
+a fixed 4 bytes (`skb_push(sizeof(struct rmnet_map_ul_csum_header))`),
+so the frame tail stays 4-aligned in both v1 and v3; (2) the IPA TX path
+(`ipa_dp.c` → `sps_transfer_one()`) passes the length as-is, with no
+`% 4` / burst-length check anywhere. The clincher: **QMAPv1 (working)
+goes through the *same* `ALIGN(…,4)` padding path as v3**, so alignment
+cannot be what distinguishes them. The real gap is the csum-header byte
+layout vs. `cs_metadata_hdr_offset` semantics — the modem rejects an
+*under-headered* frame, it is not decoding a *truncated* one. Don't
+re-chase the padding angle.
+
 ### UL throughput depends on parallelism
 
 Single-flow UL caps at ~150 KB/s, but 4 parallel streams aggregate to
@@ -779,6 +796,37 @@ multiple parallel streams and reach the aggregate rate. Single
 We have not benchmarked UL on Android Lineage 22 on the same SIM as
 a ground-truth comparison. If vendor noticeably exceeds 4 Mbps
 aggregate, the symmetric QMAPv3 work above becomes worth picking up.
+
+### TX-stall recovery is incomplete (the watchdog is inert)
+
+The UL datapath has no working recovery from a TX queue stall, so a lost
+BAM EOT interrupt or a hung modem can freeze uplink **permanently** until
+SSR or a reboot. The mechanics:
+
+- The WAN netdev (`rmnet_ipa0`) *does* register a watchdog —
+  `.ndo_tx_timeout = ipa_wwan_tx_timeout` with `watchdog_timeo = 1000`
+  (`rmnet_ipa.c`) — **but the handler is a no-op**: it only logs
+  `"data stall in UL"` and returns. It never wakes the queue, resets the
+  outstanding counter, or kicks SPS. The watchdog *detects* a stall but
+  does not *recover* from it.
+- The rmnet VND netdevs (`qmapmux0.0`) have **no watchdog at all** —
+  `rmnet_vnd_ops` sets no `.ndo_tx_timeout` and `watchdog_timeo = 0`.
+- Queue wake depends **solely** on the TX-complete callback
+  (`apps_ipa_tx_complete_notify`): `netif_wake_queue()` fires only when
+  `outstanding_pkts` drops below the low watermark. If that callback
+  stops arriving (lost EOT, modem hang, stuck SPS), the queue —
+  `netif_stop_queue()`'d at the high watermark — never reopens.
+
+In practice this is rare (the modem/SPS path is mechanically stable —
+see the 0% ping loss and sustained throughput measurements), which is
+why it has not bitten production. But it is a real robustness gap.
+
+**Future work:** make `ipa_wwan_tx_timeout()` actually recover. This is
+*not* as simple as calling `netif_wake_queue()` — blindly waking without
+reconciling `outstanding_pkts` against the real BAM ring state risks
+descriptor leaks / double-frees. A correct fix drains or resets the SPS
+pipe (or at minimum reconciles the outstanding counter) before reopening
+the queue. Treat it as a careful standalone change, not a one-liner.
 
 ### Service-startup timing
 
@@ -1125,6 +1173,25 @@ multi-PDN setup will not work by tweaking constants** — they need
 multiple mux channels, per-bearer filter/route policy, dedicated
 QoS bearers (for IMS), and a second WDS session in userspace. That
 is IPACM's actual job.
+
+The single-bearer constants are **hardcoded literals**, not just
+defaults: `mux_id = 1` appears in `ADD_MUX_CHANNEL` and in all six QMI
+filter specs, `rt_tbl_idx = 8` (`ipa_dflt_wan_rt`) in seven code
+locations, the aggregation limits (`6`/`10`/`1`) and
+`vchannel_name = "qmapmux0.0"` likewise — all in `rmnet_ipa.c`'s
+`vendor_auto_ipacm_init_fn()`. There is **no runtime tuning surface**
+for them (only the `qmapv3_ul_enable` module param exists; debugfs is
+read-only).
+
+**Future work — a sysfs/debugfs knob for `mux_id` / `rt_tbl_idx`** would
+let the *single-bearer* shape be retargeted to another operator without
+a recompile, building on the partial per-interface `ext_props` query
+that already exists. Worth doing for portability — but be clear about
+the scope: **this does *not* unlock multi-PDN / VoLTE.** A tunable
+`mux_id` still describes *one* bearer; data+IMS needs *several* mux
+channels, per-bearer policy, and a second userspace WDS session, as
+above. The knob is operator-portability for the one-bearer case, nothing
+more.
 
 ### When you would need the real IPACM
 
