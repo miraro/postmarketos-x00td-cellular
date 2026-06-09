@@ -1058,7 +1058,10 @@ production traffic.
 ### 5. WAN tethering bridge / SSR cleanup paths
 
 `teth_bridge.c` is ported but never exercised — tethering is out of
-scope. SSR (Subsystem Restart) handling is wired through
+scope. Its `connect` path is a stub and full USB tethering *hardware*
+offload is not portable as a quick win — see the feasibility breakdown
+under "USB tethering hardware offload" in the IPACM section. SSR
+(Subsystem Restart) handling is wired through
 `qcom,rmnet-ipa-ssr` but the recovery paths assume single-modem-
 restart and may need work for repeated crashes; we hit this once in
 session 29 (see project history).
@@ -1130,7 +1133,9 @@ Reach for the full daemon if you need any of:
 - Multiple simultaneous bearers (multi-PDN) with per-bearer
   filter/route policy — VoLTE/IMS and MMS land here
 - WLAN AP offload (data through IPA HW instead of the CPU)
-- USB tethering offload
+- USB tethering offload (see the feasibility breakdown below — the
+  IPA half is reachable but the USB-BAM/DWC3-GSI half is absent in
+  mainline; netfilter flowtable is the pragmatic alternative)
 - Carrier-grade NAT timeout precision
 - iOS-style "low data mode" / per-app firewalling via IPA rules
 
@@ -1156,6 +1161,73 @@ power-on
 runs whether or not `vendor-init` exists; `vendor-init` works whether
 or not auto-IPACM ran (it would just fail on first packet). They
 compose into the working stack.
+
+### USB tethering hardware offload — feasibility ("the Holy Grail")
+
+The dream: USB tethering where traffic between the gadget `usb0`
+(ConfigFS/RNDIS) and the modem netdev (`qmapmux0.0`) flows
+**BAM-to-BAM through IPA, bypassing the CPU** — the SoC sets up the
+first packet and then the IP Accelerator DMAs the flow modem↔USB on
+its own. On today's mainline port that traffic instead goes the normal
+Linux way: `usb0 → netfilter forward + conntrack → qmapmux0.0`, every
+packet through the CPU. At higher download rates the CPU spins, heats,
+and throttles.
+
+**This was assessed against the actual tree and is not portable as a
+quick win.** The tempting approach — a `register_netdevice_notifier`
+hook that spots `usb0` and fills in the `teth_bridge.c` connect stub —
+**sits on the wrong layer and cannot deliver hardware offload.** A
+netdev notifier reports an L3 event ("`usb0` came up"); it gives you no
+handle on the USB endpoint or its DMA. The standard ConfigFS RNDIS
+datapath is `u_ether`'s USB-request queue, where **the CPU copies skbs
+to/from the USB endpoint** (`eth_start_xmit` / `rx_complete`). The
+downstream `rndis_ipa.c` / `ipa_usb` glue is **not** vendor cruft to be
+discarded — replacing that datapath so the USB endpoint feeds IPA pipes
+instead of the CPU **is the offload mechanism itself**. Without it the
+endpoint is still serviced by the CPU; a notifier could at most drive a
+*software* bridge, which is what we already have.
+
+What real BAM-to-BAM offload requires, and what this tree has:
+
+| Piece | Role | State in tree |
+|---|---|---|
+| **A. USB datapath on IPA pipes** | a gadget function that owns the USB endpoints and hands them to IPA (`rndis_ipa`/`ipa_usb`) | **absent** — zero hits for `rndis_ipa`/`ecm_ipa`/`ipa_usb` |
+| **B. USB-BAM bridge** | bridges the USB controller's endpoints to the IPA BAM (`usb_bam.c`, `qcom,usb-bam`) | **absent** — the only `bam_dmux` present (`drivers/net/wwan/qcom_bam_dmux.c`) is the *modem* control channel, not USB |
+| **C. DWC3 GSI/BAM endpoints** | SDM660 USB is DWC3; an endpoint must run in BAM/GSI mode to attach to a BAM | **absent** — mainline DWC3 here has no GSI/BAM endpoint support |
+| **D. IPA HW routing/NAT/filter rules** | so IPA forwards USB↔Q6 in HW, someone must install routing/NAT/filter rules into the IPA tables | **absent** — this is IPACM's job (no daemon on pmOS); no in-kernel flow-offload-into-IPA path |
+| E. teth_bridge RM deps | clock/voltage dependencies `USB_PROD↔Q6_CONS` / `Q6_PROD↔USB_CONS` | ✅ real (`ipa2_teth_bridge_init()`) |
+| F. `ipa2_teth_bridge_connect()` | wire the pipe handles | **stub** (`return 0`) — but small *once A–D exist* |
+
+The IPA half is genuinely reachable from the kernel —
+`ipa2_connect(IPA_CLIENT_USB_PROD/CONS)` (`ipa_v2/ipa_client.c`) is real
+and returns the SPS params for a BAM-to-BAM `sps_connect()`. **The
+blocker is the USB half (B+C):** on SDM660 the USB controller is DWC3,
+and for DMA to flow "straight into the modem's pipes outside the CPU"
+the DWC3 endpoint must run in BAM/GSI mode and be bridged via `usb_bam`
+to the IPA BAM. Neither exists in mainline — DWC3 here only does
+ordinary CPU-serviced transfer requests. Bringing up the real path
+means porting `dwc3-msm` GSI support + `usb_bam` + `rndis_ipa` + an
+IPACM-equivalent rule installer: thousands of lines of downstream
+infrastructure, not "fill one stub." **Out of scope; logged here as
+long-term research so the notifier dead-end isn't re-attempted.**
+
+**The pragmatic 80%-win alternative: netfilter flowtable.** This tree
+compiles `nf_flow_table_*` and `nft_flow_offload`. The flowtable is a
+mainline software (optionally HW) fast-path: after the first packet of a
+conntrack-ESTABLISHED flow, subsequent packets take a **softirq
+shortcut** that skips the full iptables/nftables traversal and the heavy
+conntrack lookup — exactly the "CPU sets up the first packet then mostly
+forgets the flow" shape, in software. It is not zero-CPU like
+BAM-to-BAM, but it cuts the per-packet cost by an order of magnitude
+(and thus the throttling/heat). It is a few lines of nftables
+(`flowtable f { hook ingress … devices = { usb0, qmapmux0.0 } }` plus a
+`flow add @f` rule) — no kernel code, no IPA rebuild. **Measure first:**
+on the ~20 Mbps link this port reaches, plain CPU forwarding may not
+heat the CPU at all, in which case the whole offload solves a
+non-problem. Reach for the flowtable only if `top`/`/proc/interrupts`
+under a real tethering load shows the CPU actually saturating; reach for
+true IPA BAM-to-BAM only if the target is 100+ Mbps tethering, which is
+above this link's ceiling.
 
 ---
 
