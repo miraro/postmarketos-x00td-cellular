@@ -478,7 +478,7 @@ visible, grep-able, and explained in place:
 # 1. Get a mainline 6.19 kernel tree (linux.git, pmOS 6.19.y, …).
 KERNEL_TREE=/path/to/your/qcom-sdm660-6.19-kernel
 
-# 2. Overlay the pristine 4.19 baseline (75 vendor files, byte-identical
+# 2. Overlay the pristine 4.19 baseline (76 vendor files, byte-identical
 #    to lineage-sdm660-22.2 — provenance in vendor-baseline-4.19/README.md).
 cp -rT vendor-baseline-4.19/ "$KERNEL_TREE"/
 

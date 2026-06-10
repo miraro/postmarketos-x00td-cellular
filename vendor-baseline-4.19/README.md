@@ -37,7 +37,7 @@ vendor-baseline-4.19/
                              rmnet_ipa_fd_ioctl.h, rmnet_data.h)
 ```
 
-75 vendor files / ~2.3 MB (+ this README). Several of the headers are
+76 vendor files / ~2.3 MB (+ this README). Several of the headers are
 later **replaced wholesale** by shims/stubs (`port/files/include/...`)
 and the rest of the tree is transformed by the scripts — see
 `../port/apply-all.sh` for the pipeline.

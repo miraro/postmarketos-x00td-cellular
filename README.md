@@ -1,7 +1,7 @@
 # postmarketos-x00td-cellular
 
 Working mainline-kernel cellular data on the Asus Zenfone Max Pro M1
-(`asus-x00td`, Snapdragon 660 / SDM636) under PostmarketOS.
+(`asus-x00td`, Snapdragon 636 / SDM636) under PostmarketOS.
 
 **Throughput result:** ~**20.5 Mbps DL** sustained over Vodafone CZ LTE.
 
@@ -16,7 +16,7 @@ mainline-ish kernel (6.19).
 .
 ├── POSTMARKETOS_X00TD_CELLULAR.md    ← the full writeup. START HERE.
 ├── vendor-baseline-4.19/             ← pristine vendor 4.19 sources the
-│                                       port transforms (75 files, GPL-2.0,
+│                                       port transforms (76 files, GPL-2.0,
 │                                       byte-identical to lineage-sdm660-22.2).
 │                                       Overlay onto your 6.19 tree FIRST.
 ├── port/                             ← the port itself, as a documented,
@@ -39,7 +39,11 @@ mainline-ish kernel (6.19).
 ├── patches/                          ← optional extras on top of the port:
 │   ├── sdm660-ipa-port-6.19-powersave.patch       (dynamic clock scaling)
 │   ├── sdm636-asus-x00td-ipa-powersave-dts.patch  (drop the DT clock pin)
-│   └── sdm636-asus-x00td-ipa-powersave-dtbo.patch (…or as a DT overlay)
+│   ├── sdm636-asus-x00td-ipa-powersave-dtbo.patch (…or as a DT overlay)
+│   ├── ipa-tx-stall-recovery.patch                (opt-in TX-watchdog stall
+│   │                                               recovery; + .DESIGN.md and
+│   │                                               -debugknob.patch companions)
+│   └── *.TESTPLAN.md, powersave-validate.sh        (validation helpers)
 ├── dts/sdm636-asus-x00td-ipa-powersave.dtso       (the overlay source)
 └── vendor-init/                       ← userspace bearer-activation tool
     ├── Makefile
@@ -109,7 +113,7 @@ See "Known caveats" in the writeup for the long form.
 ## Hardware tested
 
 - Device: Asus Zenfone Max Pro M1 (`asus-x00td`)
-- SoC: Snapdragon 660 (SDM636), IPA v2.6L
+- SoC: Snapdragon 636 (SDM636), IPA v2.6L
 - Carrier tested: Vodafone CZ (LTE)
 - Userspace: PostmarketOS edge (Alpine-based)
 
