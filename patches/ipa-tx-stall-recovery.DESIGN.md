@@ -171,8 +171,16 @@ runtime-PM resume callback. None recovers a lost EOT.
 
 So *nothing at this layer* handled the stall, vendor included. Note IPACM
 does not either — its job is IPA rule/filter/NAT/offload management, not
-BAM-pipe TX-stall recovery (its source is not in this repo; this is from
-its architectural role, not a code read). The "data stall recovery" people
+BAM-pipe TX-stall recovery. Verified against the IPACM source
+(`data-ipa-cfg-mgr/ipacm/`): zero hits for `tx_timeout`, `watchdog`, or
+outstanding-pkt tracking; its only `recover` is
+`IPA_WLAN_CLIENT_RECOVER_EVENT` (a Wi-Fi station leaving power-save, which
+re-adds *that client's* route/NAT rules), and its only modem-restart
+reaction (`IPA_SSR_BEFORE_SHUTDOWN` / `AFTER_POWERUP` in `IPACM_Main.cpp`)
+is rule-lifecycle bookkeeping — clear external props / tell the offload
+framework "stopped", then on power-up "support available" so rules
+reinstall. It never initiates SSR, never inspects the BAM pipe, and never
+touches EOT / outstanding packets. The "data stall recovery" people
 associate with the Android stack lives a layer up and far coarser: the
 telephony framework's `DataStallRecoveryManager` / connectivity validation
 detects *end-to-end* "no data" over tens of seconds to minutes and recovers
