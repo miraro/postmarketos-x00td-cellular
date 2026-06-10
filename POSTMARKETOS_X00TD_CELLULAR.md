@@ -1163,9 +1163,10 @@ Why we don't need either on our target:
 | WLAN/tethering offload (**IPACM**) | Not in scope. |
 
 The components — kernel driver, `vendor-init`, in-kernel
-**auto-IPACM** init — together cover what a `netmgrd + Driver +
-ModemManager + IPACM` stack covers on stock Android, but with one
-bearer instead of many and no offload paths.
+**auto-IPACM** init — together cover what a `netmgrd + IPA driver +
+qcrild (RIL) + IPACM` stack covers on stock Android (Android has no
+ModemManager; `vendor-init` is what stands in for it on our pmOS
+side), but with one bearer instead of many and no offload paths.
 
 ### Hardwired assumptions (single-bearer by design)
 
