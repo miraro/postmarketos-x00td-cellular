@@ -268,14 +268,17 @@ both kernel and userspace builds.
 
 ### Build the kernel
 
-Either clone the prepared branch, or — recommended — produce the tree
-yourself from any mainline-ish 6.19 kernel with this package's script
-pipeline (see *The port as a script pipeline* below):
+Produce the tree yourself from any mainline-ish 6.19 kernel with this
+package's script pipeline (see *The port as a script pipeline* below):
 
 ```bash
-# Option A: clone our IPA v2.6L port branch
+# Start from any mainline-ish 6.19 SDM660 tree, e.g. sdm660-mainline:
 cd ~/pmbootstrap/linux
-git clone -b ipa-hybrid <your-fork-of-qcom-sdm660-6.19.y> qcom-sdm660-6.19.y
+git clone -b qcom-sdm660-6.19.y https://github.com/sdm660-mainline/linux.git qcom-sdm660-6.19.y
+
+# Overlay the pristine vendor baseline + run the port pipeline:
+cp -rT /path/to/postmarketos-x00td-cellular/vendor-baseline-4.19/ qcom-sdm660-6.19.y/
+/path/to/postmarketos-x00td-cellular/port/apply-all.sh --root qcom-sdm660-6.19.y
 cd qcom-sdm660-6.19.y
 
 # Build via pmbootstrap envkernel as usual
