@@ -23,7 +23,7 @@ transfer to other SDM6xx devices with minor port effort.
 ## TL;DR
 
 ```
-git clone https://github.com/<you>/postmarketos-x00td-cellular
+git clone https://github.com/miraro/postmarketos-x00td-cellular
 # Kernel: overlay the pristine baseline + run the port pipeline on any
 # mainline-ish 6.19 tree, then build via pmbootstrap as usual for X00TD:
 #     cp -rT postmarketos-x00td-cellular/vendor-baseline-4.19/ $KERNEL_TREE/
