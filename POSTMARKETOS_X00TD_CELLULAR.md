@@ -1454,39 +1454,35 @@ unless `dl-data-aggregation-protocol` is forced.
 
 **Status of this path on our setup:** driver concessions 1–3 are
 shipped and verified (MM does detect the modem and reach bearer
-activation — see commit `b823a67ee0e0`). The udev rule and the
+activation). The udev rule and the
 rmnet checksum flag step are **not exercised in CI**; we use
 `vendor-init` for the production bringup. If you take the MM path,
 expect to debug.
 
 ---
 
-## Other in-tree IPA driver attempts (research-grade, NOT finished)
+## Other IPA driver attempts (research-grade, NOT finished)
 
 This package ships only the `ipa_v2/` driver under
-`drivers/platform/msm/ipa/`. The full working tree at
-`qcom-sdm660-6.19.y` additionally carries **three abandoned /
-in-progress alternative IPA drivers** under `drivers/net/`. They
-are **deliberately not part of this package** — each represents a
-different exploration path that either ran into a wall or
-overlapped with the shipped driver.
+`drivers/platform/msm/ipa/`. Our broader working tree also explored a
+mainline-style alternative IPA driver, `ipa2-lite`, under
+`drivers/net/`. It is **deliberately not part of this package** — it
+represents an exploration path that ran into a wall below the kernel
+layer.
 
-We mention them here only so anyone continuing this work knows they
-exist as starting points; do not enable them in production.
+We mention it here only so anyone continuing this work knows it
+exists as a starting point; do not enable it in production.
 
 | Driver | Path | LoC | Kconfig | Status |
 |---|---|---|---|---|
 | `ipa2-lite` | `drivers/net/ipa2-lite/` | ~4 200 | `CONFIG_QCOM_IPA2_LITE` | Works on 2G EDGE, blocked below kernel layer on 4G LTE |
-| `ipa_v2_hybrid` | `drivers/net/ipa_v2_hybrid/` | ~20 200 | `CONFIG_QCOM_IPA_V2_HYBRID` | Mainline structure + 4.19 BAM backend, reached lite parity but DL never opens — definitive close |
-| `ipa_v2_6L` | `drivers/net/ipa_v2_6L/` | ~7 400 | `CONFIG_IPA_V2_6L` | Clean-room mainline-style driver, reached MM bearer-connect milestone, BAM IRQ for completions still missing |
 
-In the research tree's DTS the three drivers have mutually-exclusive
-nodes — `ipa@14780000` (vendor port, `okay`), `ipa_hybrid@147c0000`
-(`disabled`), `ipa_v2_6L@147c0000` (`disabled`); only one can be
-`okay` at a time because they all target the same physical IPA
-hardware. The DTS shipped in **this package carries only the vendor
-port node** — the research nodes were dropped because their drivers
-are not included.
+It and the shipped vendor driver share the same physical IPA MMIO
+region, so their DTS nodes (`ipa@14780000` for the vendor port,
+`ipa2-lite`'s own node) are mutually exclusive — only one can be
+`okay` at a time. The DTS shipped in **this package carries only the
+vendor port node**; the `ipa2-lite` node lives only in our working
+tree.
 
 ### `ipa2-lite`
 
@@ -1500,59 +1496,20 @@ via ipa2-lite". On 4G LTE the modem refuses to forward responses
 to new connections; the bug is below the kernel scope (modem
 firmware / carrier provisioning) and not fixable from the driver.
 
-### `ipa_v2_hybrid`
-
-Conceptually clever: take the mainline `drivers/net/ipa/` structure
-(IPA 3 driver) and back it with the 4.19 SPS/BAM register sequences
-to make it understand IPA v2.6L hardware. Reached full register and
-SRAM parity with `ipa2-lite` after 5+ fix iterations
-(HOLB, CONFIG_REQ TLVs, FT size, pipe sondas, INT flag), but DL
-packets never arrived at pipe 5 in usable form — only 4-byte BAM
-spurious-completion events with stale kernel page content. After a
-two-phase "Plan Σ" attempt (SRAM-resident zero-rule + lite register
-overlay) it was declared an **architectural dead end**; see
-"🔚 Hybrid DEFINITIVE CLOSE" in project history (commit
-`3882c49cba22`).
-
-### `ipa_v2_6L`
-
-The from-scratch clean-room rewrite started 2026-05-21. ~7 400 LoC
-in mainline-style modular layout, byte-for-byte parity with vendor
-4.19 register sequences but no inherited 4.19 source. Reached:
-
-- Full QMI handshake + uC firmware load (Phase 3)
-- BAM IRQ wired + per-pipe callback infrastructure (Phase 4a)
-- `ipa_modem0` netdev with NAPI + TX path (Phase 4b)
-- AGGR/CFG vendor parity (Phase 4c-1)
-- ModemManager bearer activation with real Vodafone CZ IPv4
-  obtained (Phase 4c bearer milestone, commit `b823a67ee0e0`)
-
-Stops at: BAM IRQ for TX/RX completions does not fire even though
-pipe 4 HW consumed all submitted descriptors. The dataplane gap is
-a separate problem from MM integration and is the natural pickup
-point if anyone wants to push this clean-room driver to completion.
-
-### When you'd care about any of these
+### When you'd care about it
 
 Almost never, for now. The shipped `ipa_v2/` port produces 20.5 Mbps
-end-to-end and is the production answer. The three alternative
-drivers matter only if:
+end-to-end and is the production answer. `ipa2-lite` matters only as
+a cross-reference: it is the smallest, easiest-to-read mainline-style
+IPA v2 implementation, useful if you want to compare a
+simpler-but-incomplete impl against the shipped vendor-derived
+driver.
 
-- You want a path closer to upstream-able mainline structure
-  → start from `ipa_v2_6L` and finish the BAM IRQ wiring
-- You want to compare a simpler-but-incomplete impl as a
-  cross-reference
-  → `ipa2-lite` is the smallest and easiest to read
-- You want to retire the vendor-derived shim layer entirely
-  → `ipa_v2_hybrid` was that bet; refer to its post-mortem before
-  spending hours rediscovering the same wall
-
-To get any of them on a fresh tree you also need to add their DTS
-nodes (`status="okay"`) and flip the vendor node to `"disabled"` —
-they share the IPA MMIO region with the shipped driver, only one can
-probe at a time. None of this is wired into this package; treat them
-as a parallel research branch available in our working tree, not as
-supported configurations.
+To get it on a fresh tree you also need to add its DTS node
+(`status="okay"`) and flip the vendor node to `"disabled"` — they
+share the IPA MMIO region, only one can probe at a time. None of this
+is wired into this package; treat it as a parallel research branch
+available in our working tree, not as a supported configuration.
 
 ---
 
