@@ -1126,36 +1126,46 @@ required for production.
 
 IPACM ("IPA Config Manager") is a userspace C++ daemon
 (~25 k LoC, source in `data-ipa-cfg-mgr/`) that complements the
-vendor kernel driver. Its responsibilities, roughly:
+vendor kernel driver. Its responsibilities, roughly (file references
+verified against the source now in `data-ipa-cfg-mgr/ipacm/`):
 
-1. Open the IPA driver fd and issue **`RMNET_IOCTL_SET_*_DATA_FORMAT`**
-   and **`RMNET_IOCTL_ADD_MUX_CHANNEL`** to set up the HW datapath
-2. Install **filter rules** (`RMNET_IOCTL_ADD_IFFLT_RULE`) per
-   interface (WAN, embedded, LAN) to steer packets between modem,
-   AP, and any WLAN/USB clients
-3. Subscribe to **conntrack** netlink and run `UpdateUDPTimeStamp` to
-   keep modem-side HW NAT cache entries fresh
-4. Listen to **`RTM_NEWLINK`/`NEWADDR`/`NEWROUTE`** and dynamically
-   install/remove rules as interfaces come up
-5. Run **routing-table sync** between Linux fib and IPA HW
-6. Manage **WLAN/tethering offload** through the `ipa_clients/`
-   subsystems
+1. Install **filter rules** (`IPA_IOC_ADD_FLT_RULE` via
+   `IPACM_Filtering.cpp`) per interface (WAN, embedded, LAN) to steer
+   packets between modem, AP, and any WLAN/USB clients
+2. Subscribe to **conntrack** netlink and run `UpdateUDPTimeStamp`
+   (`IPACM_ConntrackClient.cpp` / `IPACM_Conntrack_NATApp.cpp`) to keep
+   modem-side HW NAT cache entries fresh
+3. Listen to **`RTM_NEWLINK`/`NEWADDR`/`NEWROUTE`** (`IPACM_Netlink.cpp`)
+   and dynamically install/remove rules as interfaces come up
+4. Run **routing-table** install/sync into IPA HW (`IPACM_Routing.cpp`,
+   `IPACM_Wan.cpp` `query_ext_prop()` + default-route rules)
+5. Manage **WLAN/tethering offload** (`IPACM_OffloadManager.cpp`,
+   `IPACM_Wlan.cpp`, `IPACM_LanToLan.cpp`)
 
-Why we don't need it on our target:
+What IPACM does **not** do — verified, zero hits across the whole tree:
+it does **not** issue the datapath-bringup ioctls
+(`RMNET_IOCTL_SET_*_DATA_FORMAT`, `ADD_MUX_CHANNEL`). Those are
+**netmgrd's** job on stock Android; IPACM only starts reacting *after*
+the `rmnet_data*` interfaces already exist. So the in-kernel auto-init
+hook below actually stands in for **two** userspace daemons — netmgrd
+(the datapath/mux ioctls) and a thin slice of IPACM (the one WAN
+route/filter shape) — not IPACM alone.
 
-| IPACM responsibility | Why we get away without it |
+Why we don't need either on our target:
+
+| Userspace responsibility (daemon) | Why we get away without it |
 |---|---|
-| (1) Datapath setup | Three ioctls — `SET_EGRESS=0x06`, `SET_INGRESS=0x3e`, `ADD_MUX mux=1` — done **once** by the in-kernel **`vendor_auto_ipacm_init_fn()`** hook in `rmnet_ipa.c`, fired automatically off `ipa_q6_handshake_complete()` with a 3 s delay. After that, the datapath stays up indefinitely. |
-| (2) Filter rules | v2.6L modem installs its own filter rules via the `qcom,modem-cfg-emb-pipe-flt` DT property — AP-side filter install is a no-op. |
-| (3) NAT timestamp refresh | Userspace `ping -i 5 $gw` keepalive as documented above. Not pretty but functional. |
-| (4) Netlink-driven dynamic rules | Single static bearer; no dynamic events to react to. |
-| (5) FIB sync | We program one default route via `ip route add`; nothing to sync. |
-| (6) WLAN/tethering offload | Not in scope. |
+| Datapath setup (**netmgrd**) | Three ioctls — `SET_EGRESS=0x06`, `SET_INGRESS=0x3e`, `ADD_MUX mux=1` — done **once** by the in-kernel **`vendor_auto_ipacm_init_fn()`** hook in `rmnet_ipa.c`, fired automatically off `ipa_q6_handshake_complete()` with a 3 s delay. After that, the datapath stays up indefinitely. |
+| Filter rules (**IPACM**) | v2.6L modem installs its own filter rules via the `qcom,modem-cfg-emb-pipe-flt` DT property — AP-side filter install is a no-op. |
+| NAT timestamp refresh (**IPACM**) | Userspace `ping -i 5 $gw` keepalive as documented above. Not pretty but functional. |
+| Netlink-driven dynamic rules (**IPACM**) | Single static bearer; no dynamic events to react to. |
+| Route install/sync (**IPACM**) | We program one default route via `ip route add`; the modem already owns the one WAN route table. |
+| WLAN/tethering offload (**IPACM**) | Not in scope. |
 
-The three components — kernel driver, `vendor-init`, in-kernel
-**auto-IPACM** init — together cover what a `Driver + ModemManager
-+ IPACM` stack covers on stock Android, but with one bearer instead
-of many and no offload paths.
+The components — kernel driver, `vendor-init`, in-kernel
+**auto-IPACM** init — together cover what a `netmgrd + Driver +
+ModemManager + IPACM` stack covers on stock Android, but with one
+bearer instead of many and no offload paths.
 
 ### Hardwired assumptions (single-bearer by design)
 
