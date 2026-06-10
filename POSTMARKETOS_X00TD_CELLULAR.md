@@ -124,26 +124,26 @@ Lineage 4.19 (`lineage-sdm660-22.2`) to mainline 6.19. This is
 the large piece: roughly 5000+ lines of `drivers/platform/msm/ipa/ipa_v2/`
 adapted for current mainline APIs (dmaengine, IRQ chip, regmap, etc.).
 
-The port lives on branch `ipa-hybrid` of the kernel repo, and ships
-in this package in fully reproducible form: a pristine vendor-source
-baseline (`vendor-baseline-4.19/`) plus the `port/` script pipeline
-that transforms it (see *The port as a script pipeline* below). It is
-not yet ready for upstream submission — too many vendor-specific
-heuristics and disabled features — but it is functional and stable
-on X00TD.
+The port ships in this package in fully reproducible form: a pristine
+vendor-source baseline (`vendor-baseline-4.19/`) plus the `port/`
+script pipeline that transforms it (see *The port as a script
+pipeline* below). It is not yet ready for upstream submission — too
+many vendor-specific heuristics and disabled features — but it is
+functional and stable on X00TD.
 
-Key commits at the head of `ipa-hybrid`:
+The key changes the port introduces, on top of the vendor baseline:
 
-```
-0031ea860581  rmnet_vnd: default-enable IP_CSUM features so UL csum offload actually works
-62a616525d75  rmnet_ipa: opt-in QMAPv3 UL via qmapv3_ul_enable module param
-33647497e73c  rmnet_ipa: query per-interface ext_props for mux_id + rt_tbl_idx
-04241040da70  rmnet/ipa2: Phase 3 IPACM expansion — GRO_HW, 6-spec QMI, FILTER_INSTALLED_NOTIF
-ced8c617c448  ipa2/rmnet_ipa: vendor max_mtu parity + IPACM Phase 1+2 port
-```
+- `rmnet_vnd`: default-enable IP_CSUM features so UL csum offload
+  actually works
+- `rmnet_ipa`: opt-in QMAPv3 UL via the `qmapv3_ul_enable` module param
+- `rmnet_ipa`: query per-interface `ext_props` for `mux_id` + `rt_tbl_idx`
+- `rmnet/ipa2`: Phase 3 IPACM expansion — GRO_HW, 6-spec QMI,
+  FILTER_INSTALLED_NOTIF
+- `ipa2/rmnet_ipa`: vendor `max_mtu` parity + IPACM Phase 1+2 port
 
-The first commit is small and self-contained and could be considered
-for upstream review independently — see Section C below.
+The first of these (the `rmnet_vnd` default-enable change) is small
+and self-contained and could be considered for upstream review
+independently — see Section C below.
 
 ### B. Userspace — `vendor-init` utility
 
@@ -221,8 +221,7 @@ csum header and sends the frame. The modem receives a malformed UL
 frame and drops it — silently. Symptom: 100 % packet loss on UL once
 you enable `EGRESS_MAP_CKSUMV4`, with no kernel error message.
 
-The change (applied by `port/05-integrate-mainline-tree.sh`; original
-commit `0031ea860581`):
+The change (applied by `port/05-integrate-mainline-tree.sh`):
 
 ```diff
 --- a/drivers/net/ethernet/qualcomm/rmnet/rmnet_vnd.c
