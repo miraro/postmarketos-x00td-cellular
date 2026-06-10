@@ -151,7 +151,8 @@ Standalone 8-stage cellular bringup binary. Statically linked (no
 glibc dependency on device), about 676 KB ARM aarch64.
 
 Source: `vendor-init/` in this repo. About 1900 LoC of
-plain C99, single dependency on `linux/qrtr.h` for `AF_QIPCRTR`.
+C (built `-std=gnu11`), single dependency on `linux/qrtr.h` for
+`AF_QIPCRTR`.
 
 Pipeline:
 
@@ -821,12 +822,23 @@ In practice this is rare (the modem/SPS path is mechanically stable —
 see the 0% ping loss and sustained throughput measurements), which is
 why it has not bitten production. But it is a real robustness gap.
 
-**Future work:** make `ipa_wwan_tx_timeout()` actually recover. This is
-*not* as simple as calling `netif_wake_queue()` — blindly waking without
-reconciling `outstanding_pkts` against the real BAM ring state risks
-descriptor leaks / double-frees. A correct fix drains or resets the SPS
-pipe (or at minimum reconciles the outstanding counter) before reopening
-the queue. Treat it as a careful standalone change, not a one-liner.
+Note this caveat describes the **default pipeline output** — the base
+port (what `apply-all.sh` produces) still ships the inert handler above.
+
+**A recovery implementation now exists as an opt-in patch:**
+`patches/ipa-tx-stall-recovery.patch` (design rationale in
+`patches/ipa-tx-stall-recovery.DESIGN.md`). It is *not* in the default
+pipeline — apply it deliberately. The naive fix (just calling
+`netif_wake_queue()`) is wrong: blindly waking without reconciling
+`outstanding_pkts` against the real BAM ring state risks descriptor
+leaks / double-frees. Instead the patch re-runs the completion *harvest*
+(`ipa2_tx_dp_kick_stalled_pipe()` re-arms the SPS poll the lost EOT
+would have triggered), which is XPU-safe (it touches only the AP's own
+BAM FIFO) and self-degrading (a genuine modem hang simply finds nothing
+to harvest). It keeps the `is_ssr` guard so it stands down during an
+SSR. **Status: written and patch-verified, not yet hardware-tested** —
+a `tx_stall_kick` debug knob (`ipa-tx-stall-recovery-debugknob.patch`)
+is provided to exercise the kick path on-device before trusting it.
 
 ### Service-startup timing
 
@@ -1289,8 +1301,12 @@ IPACM-equivalent rule installer: thousands of lines of downstream
 infrastructure, not "fill one stub." **Out of scope; logged here as
 long-term research so the notifier dead-end isn't re-attempted.**
 
-**The pragmatic 80%-win alternative: netfilter flowtable.** This tree
-compiles `nf_flow_table_*` and `nft_flow_offload`. The flowtable is a
+**The pragmatic 80%-win alternative: netfilter flowtable.** The
+mainline source for it (`nf_flow_table_*`, `nft_flow_offload`) is
+in-tree, but the X00TD defconfig ships it **disabled**
+(`# CONFIG_NF_FLOW_TABLE is not set`, and `CONFIG_NFT_FLOW_OFFLOAD`
+likewise unset) — enabling it is a two-line defconfig change plus a
+kernel rebuild/reflash, but **no new code**. The flowtable is a
 mainline software (optionally HW) fast-path: after the first packet of a
 conntrack-ESTABLISHED flow, subsequent packets take a **softirq
 shortcut** that skips the full iptables/nftables traversal and the heavy
@@ -1299,7 +1315,8 @@ forgets the flow" shape, in software. It is not zero-CPU like
 BAM-to-BAM, but it cuts the per-packet cost by an order of magnitude
 (and thus the throttling/heat). It is a few lines of nftables
 (`flowtable f { hook ingress … devices = { usb0, qmapmux0.0 } }` plus a
-`flow add @f` rule) — no kernel code, no IPA rebuild. **Measure first:**
+`flow add @f` rule) — no new kernel code and no IPA-driver rebuild
+(only the two flowtable configs enabled). **Measure first:**
 on the ~20 Mbps link this port reaches, plain CPU forwarding may not
 heat the CPU at all, in which case the whole offload solves a
 non-problem. Reach for the flowtable only if `top`/`/proc/interrupts`
@@ -1308,7 +1325,9 @@ true IPA BAM-to-BAM only if the target is 100+ Mbps tethering, which is
 above this link's ceiling.
 
 Unlike the BAM-to-BAM path, this option *is* actionable today: it needs
-no kernel changes and no reflash. The concrete next step is a short
+**no new kernel code** — just the two flowtable Kconfig symbols enabled
+in the defconfig and a rebuild/reflash, then the nftables ruleset. The
+concrete next step is a short
 nftables flowtable ruleset bridging `usb0 ↔ qmapmux0.0` plus an
 on-device A/B of CPU load (`top` / `/proc/interrupts` / thermal zone)
 during a real tethering pull, with and without the flowtable, to confirm
