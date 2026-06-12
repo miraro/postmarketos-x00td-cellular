@@ -56,6 +56,19 @@ post-reboot to LTE-attached state.
 Single-flow UL appears to be server-side or per-flow Vodafone shaping,
 not a driver-side limit (aggregate scales linearly across streams).
 
+> **Re-measured 2026-06-12 (single snapshot, on-device):** DL re-confirmed
+> at **~21.4 Mbit/s** (tele2 50 MB *and* cloudflare `__down` 50 MB agree).
+> UL came back **lower and did not scale**: ~62-70 KB/s single-flow (tele2
+> PUT, two runs, full 5 MB, HTTP 200) and only **~88 KB/s aggregate** over
+> 4 parallel streams (very uneven: 64/18/6/0.9 KB/s). So on this run
+> parallel UL did **not** "scale linearly" — the link looked UL-limited at
+> ~0.7 Mbit/s aggregate, **contradicting** the per-flow-shaping reading
+> above. Treat both as condition-dependent snapshots (cell load/signal
+> vary; public iperf3 servers were all busy, so this is HTTP-based). The
+> large DL↔UL asymmetry (~30×) is the real, repeatable observation and the
+> motivation for getting symmetric QMAPv3 UL working (see *Known caveats →
+> Symmetric QMAPv3 UL*).
+
 ---
 
 ## Hardware and software targets
@@ -989,17 +1002,40 @@ traffic gets 100 % packet loss after that. The path that bites us:
 
 - mainline rmnet emits a 4-byte UL csum header before the IP packet
 - IPA EGRESS pipe 4 with `hdr_len=8 + cs_offload_en=UL +
-  cs_metadata_hdr_offset=1` (matching vendor) appears to expect a
-  byte layout the mainline rmnet doesn't produce exactly the same
-  way
+  cs_metadata_hdr_offset=1` (matching vendor)
 - Net result: modem rejects all UL frames silently
 
-We narrowed this down to *one* necessary precondition (NETIF\_F\_IP\_CSUM
-default-enabled, see Section C above) but it isn't sufficient. The
-remaining gap is probably in the relationship between mainline rmnet's
-`rmnet_map_ul_csum_header` layout and what IPA HW expects from
-`cs_metadata_hdr_offset` units. Vendor `netmgrd` may also do some
-additional per-mux UL config we haven't reproduced.
+**The UL-csum-header-layout hypothesis is REFUTED (2026-06-12).** Diffed
+mainline vs the downstream vendor tree byte-for-byte; the UL csum header
+they produce is **identical**:
+
+| field | mainline (`if_rmnet.h` + `rmnet_map_data.c`) | vendor (`rmnet_map.h` bitfields) |
+|---|---|---|
+| `csum_start_offset` | `htons(skb_network_header_len)` = htons(L3 hdr len) | `htons(transport_header - iphdr)` = same |
+| 2nd word | `htons(ENABLED b15 \| UDP b14 \| offset b0-13)` | bitfields `insert_offset:14 \| udp_ind:1 \| enabled:1` + `htons` → same bits |
+| complement | `rmnet_map_complement_ipv4_txporthdr_csum_field` | identical function |
+
+So the 4-byte csum header is **not** the difference, and
+`cs_metadata_hdr_offset=1` matches the `[QMAP(4)][csum(4)][IP]` layout
+both produce. The NETIF\_F\_IP\_CSUM precondition (Section C) is necessary
+but the csum header itself is correct.
+
+**Remaining candidates for the 100 % UL loss (not yet bisected):**
+1. **QMAP map header / aggregation framing** for the csum-UL path — the
+   4-byte MAP header *around* the csum header, or the UL `aggr` config,
+   may differ from what the modem expects at `ul_data_agg_proto=7`.
+2. **WDA data-format vs csum**: `vendor-init` negotiates `ul_proto=7` but
+   may not set every TLV the modem needs to actually accept csum-bearing
+   UL (vendor `netmgrd` sends more).
+3. **CKSUMV4 vs the proto-7 framing**: confirm proto 7 really maps to the
+   4-byte CKSUMV4 header and not a v5/next-header format.
+
+**Next step is on-device, not static analysis:** enable
+`qmapv3_ul_enable=1` + `vendor-init --full-ul` + `egress-mapv4-checksum
+on`, then determine *where* the frame dies — capture the egress at
+`qmapmux0.0` (the IP packet is visible; the QMAP+csum headers are added
+below it), check IPA drop/error stats and the modem's QMI data-format
+response, and compare the on-wire UL frame against a vendor-ROM capture.
 
 Production recommendation: **asymmetric** (DL=7, UL=5). DL gets full
 20.5 Mbps. UL stays at QMAPv1, which aggregates to ~4 Mbps across
