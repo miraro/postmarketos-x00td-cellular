@@ -1343,18 +1343,23 @@ read -r -d '' NEW <<'PORT_EOF' || true
 		case QMI_IPA_FILTER_ACTION_EXCEPTION_V01:
 			/* Fall through */
 		default:
-			/* Modem leaves filter_action=INVALID(0) on its UL specs
-			 * but sets is_routing_table_index_valid with a modem-range
-			 * index (1/2). Mapping these to PASS_TO_ROUTING so they
-			 * actually install was TRIED and REVERTED: with the rules
-			 * live, TLS uplink records arrive corrupted at the peer
-			 * (server returns bad_record_mac / decode_error alerts;
-			 * plain HTTP and all DL stay byte-perfect). The UL routing
-			 * path mishandles these specs on this mainline port —
-			 * almost certainly a UL checksum-offload interaction. Until
-			 * that is root-caused, keep them as EXCEPTION (dropped by
-			 * the HW validator, UL stays on the clean default route).
-			 * The resulting ":1034 invalid RT tbl" log lines are benign.
+			/* Modem leaves filter_action=INVALID(0) on these UL specs
+			 * and carries an rt_tbl_idx the HW validator rejects, so
+			 * they never install (__ipa_add_flt_rule:1034 "invalid RT
+			 * tbl" -> ipa2_add_flt_rule_usr:1275 "failed to add flt
+			 * rule"). Those log lines are BENIGN: the specs are
+			 * EXCEPTION-action, so UL rides the clean default route
+			 * (the proven working datapath).
+			 *
+			 * Forcing them in (mapping to PASS_TO_ROUTING) was TRIED
+			 * and REVERTED: it broke UL TCP integrity at the peer. The
+			 * known UL-side defect on this port is the broken IPA HW UL
+			 * checksum offload (see stage_post_tune: UL only works with
+			 * tx-checksum off / SW csum) -- routing UL through the modem
+			 * specs is the likely trigger, but this was not re-tested
+			 * after the tx-checksum-off default landed. (The occasional
+			 * HTTPS handshake failures are a separate issue -- the
+			 * post-quantum ClientHello -- not this.) Keep them EXCEPTION.
 			 */
 			ipa_qmi_ctx->q6_ul_filter_rule[i].action =
 							IPA_PASS_TO_EXCEPTION;
