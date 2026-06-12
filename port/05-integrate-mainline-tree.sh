@@ -23,9 +23,10 @@
 #   6. upstream rmnet (drivers/net/ethernet/qualcomm/rmnet/rmnet_vnd.c):
 #        a. NETIF_F_IP_CSUM|IPV6_CSUM into hw_features  (vanilla mainline
 #           lacks it; pmOS 6.19 already has it -> skipped there)
-#        b. NETIF_F_GRO_HW + default-enable the csum features — without
-#           this, enabling EGRESS_MAP_CKSUMV4 makes rmnet memset-zero the
-#           UL csum header and the modem silently drops all UL traffic
+#        b. NETIF_F_GRO_HW capability. The csum features are deliberately
+#           left OUT of dev->features (UL tx-checksum stays OFF): the IPA
+#           UL csum OFFLOAD is broken on this modem (wrong TCP/UDP csum ->
+#           peer drops UL), so UL always uses a software checksum.
 #
 # Usage:  ./05-integrate-mainline-tree.sh [--root /path/to/kernel]
 
@@ -225,17 +226,23 @@ else
 	echo "  [ok]   hw_features NETIF_F_IP_CSUM|IPV6_CSUM"
 fi
 
-# 6b: GRO_HW capability + default-enable the csum features.
-# rmnet_map_v4_checksum_uplink_packet() checks orig_dev->features (not
-# hw_features) and silently memset-zeroes the UL csum header when the
-# features are off -> modem drops every UL frame once EGRESS_MAP_CKSUMV4
-# is enabled. Default-enable them; ethtool -K can still toggle.
-if grep -qF 'rmnet_dev->features    |= NETIF_F_IP_CSUM' "$RMNET_VND"; then
-	echo "  [skip] GRO_HW + default-enabled csum features"
+# 6b: GRO_HW capability ONLY — do NOT default-enable the csum features.
+# The IPA UL csum OFFLOAD is broken on this modem: it computes wrong
+# TCP/UDP checksums, so the peer drops every TCP/UDP UL packet whenever the
+# offload runs (EGRESS_MAP_CKSUMV4 on + NETIF_F_IP_CSUM in dev->features).
+# UL must always use the SOFTWARE checksum, i.e. tx-checksum OFF — the
+# default when NETIF_F_IP_CSUM is kept out of dev->features. Proven
+# on-device 2026-06-12: tx-checksum on -> TCP UL 0/10; off -> 10/10 (UL
+# also jumps to ~26 Mbit/s with QMAPv3 UL aggregation). vendor-init's
+# stage_post_tune forces tx-checksum off too, belt-and-suspenders.
+# NETIF_F_IP_CSUM stays in hw_features (6a) so `ethtool -K` can re-enable
+# it for anyone wanting to re-test the (broken) offload.
+if grep -qF 'rmnet_dev->hw_features |= NETIF_F_GRO_HW;' "$RMNET_VND"; then
+	echo "  [skip] GRO_HW capability"
 else
-	perl -0777 -i -pe 's/(\trmnet_dev->hw_features \|= NETIF_F_SG;\n)/$1\t\/* Vendor 4.19 parity: the underlying IPA HW can GRO-coalesce. *\/\n\trmnet_dev->hw_features |= NETIF_F_GRO_HW;\n\n\t\/* UL csum offload: rmnet_map_v4_checksum_uplink_packet() falls back\n\t * to memset-zeroing the UL csum header when these are not ENABLED\n\t * (it tests features, not hw_features) - the modem then silently\n\t * drops all UL traffic with EGRESS_MAP_CKSUMV4 on. Default-enable;\n\t * ethtool -K can still toggle them.\n\t *\/\n\trmnet_dev->features    |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;\n/' "$RMNET_VND"
+	perl -0777 -i -pe 's/(\trmnet_dev->hw_features \|= NETIF_F_SG;\n)/$1\t\/* Vendor 4.19 parity: the underlying IPA HW can GRO-coalesce. *\/\n\trmnet_dev->hw_features |= NETIF_F_GRO_HW;\n\n\t\/* NETIF_F_IP_CSUM is intentionally NOT enabled in dev->features (only\n\t * in hw_features): the IPA UL csum OFFLOAD is broken on this modem\n\t * (wrong TCP\/UDP checksum -> peer drops UL), so UL uses a software\n\t * checksum (tx-checksum off). ethtool -K can re-enable to re-test. *\/\n/' "$RMNET_VND"
 	grep -qF 'NETIF_F_GRO_HW' "$RMNET_VND" || { echo "ERROR: rmnet_vnd SG anchor not found" >&2; exit 1; }
-	echo "  [ok]   GRO_HW + default-enabled csum features"
+	echo "  [ok]   GRO_HW capability (csum features left OFF — broken UL offload)"
 fi
 
 echo
