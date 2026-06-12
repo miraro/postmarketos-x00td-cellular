@@ -1,8 +1,10 @@
 # Mainline cellular data on Asus Zenfone Max Pro M1 (X00TD / SDM636)
 
-**Status:** working production. 20.5 Mbps DL sustained, ~4 Mbps UL
-aggregate over Vodafone CZ LTE, on mainline Linux 6.19 (PostmarketOS),
-without ModemManager driving the bearer.
+**Status:** working production. 20.5 Mbps DL sustained over Vodafone CZ
+LTE, on mainline Linux 6.19 (PostmarketOS), without ModemManager driving
+the bearer. UL is ~65 KB/s in the default asymmetric config, but **goes
+symmetric at ~26 Mbit/s with the opt-in QMAPv3 UL path** (see *Known
+caveats → Symmetric QMAPv3 UL*).
 
 This document describes:
 
@@ -266,58 +268,34 @@ This change is **necessary if you want UL QMAPv3 (symmetric
 config)**. For the asymmetric DL-only QMAPv3 production config —
 which is what we recommend — it's not strictly required.
 
-#### C.1 — Critical correction (2026-06-12): the unconditional `features` enable is *harmful* in the production config
+#### C.1 — Corrected (2026-06-12): tx-checksum must be OFF, but the reason is the broken UL csum *offload* — not TLS
 
-Re-verified end-to-end against the downstream tree
-(`android_kernel_qcom_sdm660`) and the mainline rmnet sources. The
-"not strictly required" framing above was too soft. In the
-**default asymmetric production config (UL = QMAPv1,
-`EGRESS_MAP_CKSUMV4` OFF)** the `features |= NETIF_F_IP_CSUM |
-NETIF_F_IPV6_CSUM` line (`rmnet_vnd.c:326`) is **actively harmful**,
-and is the prime suspect for the UL TLS corruption (`bad_record_mac`
-at the peer; DL is byte-perfect, plain-TCP tolerates it, TLS does
-not).
+An earlier pass here blamed the unconditional `NETIF_F_IP_CSUM` enable for
+"UL TLS corruption." **That was wrong on two counts and is retracted:**
 
-Two *independent* checksum layers were being conflated:
+- The intermittent TLS failures were the **post-quantum ClientHello** — a
+  cellular-path issue unrelated to checksums (see *Known caveats →
+  TLS/HTTPS handshake*).
+- UL bytes are in fact **byte-perfect** in the asymmetric config (40/40
+  random-binary HTTP POSTs md5-match). The modem's NAT recomputes the
+  QMAPv1 UL checksum, so a deferred (`CHECKSUM_PARTIAL`) checksum corrupts
+  nothing there.
 
-1. **rmnet `EGRESS_MAP_CKSUMV4` data_format flag** — controls whether
-   rmnet inserts the 4-byte UL csum header and runs
-   `rmnet_map_v4_checksum_uplink_packet()`. The `memset`-zero
-   fallback (the bug Section C originally describes) only ever runs
-   **when this flag is on** — `rmnet_map_checksum_uplink_packet()` is
-   gated by `if (csum_type)` in `rmnet_handlers.c:143-158`. In the
-   production config this flag is **OFF**, so that path is dormant.
+**The real finding:** the IPA UL checksum **offload** is broken on this
+modem. It only *runs* when `EGRESS_MAP_CKSUMV4` is on (symmetric QMAPv3 UL,
+`--full-ul`) — and then it computes wrong TCP/UDP checksums, so the peer
+drops every TCP/UDP packet (ICMP, never offloaded, still pings). Proven
+on-device: tx-checksum **on** → TCP UL 0/10; **off** → 10/10 (and UL jumps
+to ~26 Mbit/s).
 
-2. **`NETIF_F_IP_CSUM` netdev feature** (`= tx-checksum-ipv4: on` in
-   `ethtool -k`) — independent of the flag above. When it is in
-   `dev->features`, the Linux stack emits UL TCP/UDP skbs as
-   `CHECKSUM_PARTIAL` (L4 checksum *deferred to the device*). But
-   with `EGRESS_MAP_CKSUMV4` OFF, rmnet's egress handler never
-   completes the checksum, and the IPA egress pipe (UL = QMAPv1, no
-   `cs_offload_en`) does not either. The frame leaves with an
-   **incomplete L4 checksum** → corrupted uplink.
-
-So the original change put `NETIF_F_IP_CSUM` into `features`
-**unconditionally**, which is correct *only* when
-`EGRESS_MAP_CKSUMV4` is also active. In the default config (flag OFF)
-it should stay **out of `features`** (keep it in `hw_features` so
-`ethtool -K` can still turn it on for the QMAPv3-UL path).
-
-**Fix options:**
-
-- **Kernel (correct fix):** gate line 326 — only OR
-  `NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM` into `features` when the port
-  will run `EGRESS_MAP_CKSUMV4`/`V5`. Keep them in `hw_features`
-  always.
-- **Userspace (zero-rebuild) — implemented:**
-  `vendor-init/stage_post_tune.c` now disables UL tx-checksum in the
-  non-`full_ul` branch
-  (`ethtool -K qmapmux0.0 tx-checksum-ipv4 off tx-checksum-ipv6 off`,
-  plus the parent `rmnet_ipa0` best-effort), so the stack computes a
-  correct SW checksum. The `--full-ul` branch leaves it on (QMAPv3 UL
-  needs the offload). Confirm on-device with
-  `ethtool -k qmapmux0.0 | grep tx-checksum-ipv4` (must read `off`),
-  then re-test HTTPS upload.
+**The fix is one toggle, applied to both configs:** `stage_post_tune` now
+forces tx-checksum **off unconditionally**, so the stack computes a correct
+software L4 checksum and rmnet zeroes the UL csum header (the `sw_csum`
+path). In the symmetric config this is what makes UL work; in the
+asymmetric config it is harmless (the offload was never attempted there).
+The earlier idea of gating `rmnet_vnd.c:326` is moot — the simplest correct
+behaviour is "never offload the UL checksum on this modem." See *Known
+caveats → Symmetric QMAPv3 UL*.
 
 **`vendor-init` itself is clean — no bug there.** It correctly keeps
 `full_ul = 0` by default (only `-U`/`--full-ul` sets it), sends
@@ -993,56 +971,64 @@ print("UL clean:", hashlib.md5(g).hexdigest()==hashlib.md5(d).hexdigest())
 EOF
 ```
 
-### Symmetric QMAPv3 UL is not fully working
+### Symmetric QMAPv3 UL — WORKS (with the HW csum offload disabled)
 
-Vendor Android negotiates `ul_proto=7` (QMAPv3 UL). We can do the
-same with `vendor-init --full-ul` plus the kernel knob
-`qmapv3_ul_enable=1`, and the WDA negotiation succeeds. But UL data
-traffic gets 100 % packet loss after that. The path that bites us:
+**Resolved on-device 2026-06-12: UL goes symmetric at ~26 Mbit/s** — up
+from ~65 KB/s asymmetric, a **~50× lift**, with UL now ≈ DL. The old
+"symmetric QMAPv3 UL = 100 % packet loss" was *two* separate problems,
+neither of which is the QMAPv3 UL format itself:
 
-- mainline rmnet emits a 4-byte UL csum header before the IP packet
-- IPA EGRESS pipe 4 with `hdr_len=8 + cs_offload_en=UL +
-  cs_metadata_hdr_offset=1` (matching vendor)
-- Net result: modem rejects all UL frames silently
+**(1) A setup artifact.** `qmapv3_ul_enable` is read **once**, when
+`auto_ipacm` builds the egress pipe (~3 s after the Q6 handshake at boot).
+It is strictly one-shot: `auto_ipacm_init_done` is set once
+(`rmnet_ipa.c:4140`) and never reset — the "re-arms post-SSR" comment is
+wrong. Setting the knob at runtime via sysfs does **not** rebuild the live
+pipe (confirmed: UL stayed 0 % loss ⇒ pipe stayed `hdr_len=4`). Earlier
+attempts toggled it live, so the rmnet 8-byte egress header never matched
+the still-4-byte pipe → the modem dropped everything. **Fix: set it at
+boot** via `/etc/modprobe.d/`, then reboot.
 
-**The UL-csum-header-layout hypothesis is REFUTED (2026-06-12).** Diffed
-mainline vs the downstream vendor tree byte-for-byte; the UL csum header
-they produce is **identical**:
+**(2) The IPA UL csum OFFLOAD is broken on this modem.** With the pipe
+correctly `hdr_len=8`, symmetric UL still failed — but **only for
+TCP/UDP**: to a ping-OK server, ICMP UL was 10/10 while TCP UL was 0/10.
+ICMP takes rmnet's zeroed-header `sw_csum` path; TCP/UDP get the csum
+header *filled* and the IPA HW asked to compute the L4 checksum — which it
+computes **wrong**, so the peer drops the packet. The csum header *bytes*
+are correct (byte-identical to the vendor tree, table below) — it is the
+HW *computation* that is broken. **Fix: don't offload — use the software
+checksum** (turn tx-checksum off, so the stack computes a correct L4 csum
+and rmnet zeroes the header). With `tx-checksum off`: TCP UL 0/10 → 10/10
+and UL → ~26 Mbit/s. The QMAPv3 UL throughput win comes from
+**aggregation** (the modem enabling UL aggregation once it sees a
+QMAPv3-capable AP), independent of the offload. `stage_post_tune` now
+forces tx-checksum off in **both** configs.
 
-| field | mainline (`if_rmnet.h` + `rmnet_map_data.c`) | vendor (`rmnet_map.h` bitfields) |
+**Full working recipe:**
+```sh
+echo "options ipa_driver qmapv3_ul_enable=1" | sudo tee /etc/modprobe.d/ipa-symmetric.conf
+sudo reboot
+# after boot:
+sudo vendor-init --full-ul     # WDA ul_proto=7 + egress-mapv4-checksum on + tx-checksum off
+# verify: ethtool -k qmapmux0.0 | grep tx-checksum-ipv4  → off
+#         cat /run/vendor-init/wda_ul_proto              → 7
+```
+Measured (2026-06-12): **UL ~3.3 MB/s (~26 Mbit/s)** 5 MB PUT HTTP 200,
+**DL ~20.7 Mbit/s** 100 MB — roughly symmetric. Step-by-step + bisection
+in `patches/qmapv3-ul-symmetric.TESTPLAN.md`.
+
+**The UL csum header bytes are identical to vendor** (which is why the
+header was never the problem — the *offload* is):
+
+| field | mainline | vendor |
 |---|---|---|
-| `csum_start_offset` | `htons(skb_network_header_len)` = htons(L3 hdr len) | `htons(transport_header - iphdr)` = same |
-| 2nd word | `htons(ENABLED b15 \| UDP b14 \| offset b0-13)` | bitfields `insert_offset:14 \| udp_ind:1 \| enabled:1` + `htons` → same bits |
-| complement | `rmnet_map_complement_ipv4_txporthdr_csum_field` | identical function |
+| `csum_start_offset` | `htons(skb_network_header_len)` | `htons(transport_header - iphdr)` = same |
+| 2nd word | `htons(ENABLED b15 \| UDP b14 \| offset b0-13)` | bitfields → same bits |
+| complement | `rmnet_map_complement_ipv4_txporthdr_csum_field` | identical |
 
-So the 4-byte csum header is **not** the difference, and
-`cs_metadata_hdr_offset=1` matches the `[QMAP(4)][csum(4)][IP]` layout
-both produce. The NETIF\_F\_IP\_CSUM precondition (Section C) is necessary
-but the csum header itself is correct.
-
-**Remaining candidates for the 100 % UL loss (not yet bisected):**
-1. **QMAP map header / aggregation framing** for the csum-UL path — the
-   4-byte MAP header *around* the csum header, or the UL `aggr` config,
-   may differ from what the modem expects at `ul_data_agg_proto=7`.
-2. **WDA data-format vs csum**: `vendor-init` negotiates `ul_proto=7` but
-   may not set every TLV the modem needs to actually accept csum-bearing
-   UL (vendor `netmgrd` sends more).
-3. **CKSUMV4 vs the proto-7 framing**: confirm proto 7 really maps to the
-   4-byte CKSUMV4 header and not a v5/next-header format.
-
-**Next step is on-device, not static analysis:** enable
-`qmapv3_ul_enable=1` + `vendor-init --full-ul` + `egress-mapv4-checksum
-on`, then determine *where* the frame dies — capture the egress at
-`qmapmux0.0` (the IP packet is visible; the QMAP+csum headers are added
-below it), check IPA drop/error stats and the modem's QMI data-format
-response, and compare the on-wire UL frame against a vendor-ROM capture.
-
-Production recommendation: **asymmetric** (DL=7, UL=5). DL gets full
-20.5 Mbps. UL stays at QMAPv1, which aggregates to ~4 Mbps across
-multiple TCP flows — plenty for normal cellular use.
-
-The kernel and `vendor-init` opt-in machinery is in place if anyone
-wants to dig further.
+Production note: asymmetric (DL=7, UL=5) remains the zero-config default;
+the symmetric ~26 Mbit/s UL is opt-in (`--full-ul` + the modprobe.d knob +
+reboot). The IPA UL csum-offload HW bug is not AP-fixable; the SW-csum
+workaround sidesteps it with no measurable cost at these rates.
 
 **Refuted hypothesis — it is *not* a BAM 4-byte DMA-padding problem.**
 A tempting theory is that the QMAPv3 csum header makes `skb->len`

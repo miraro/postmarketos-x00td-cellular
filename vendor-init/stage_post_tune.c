@@ -169,6 +169,43 @@ int stage_post_tune(struct vi_ctx *ctx)
 	try_cmd_opt("qmapmux0.0 GSO on", "ethtool -K qmapmux0.0 gso on >/dev/null 2>&1");
 	try_cmd_opt("qmapmux0.0 TSO on", "ethtool -K qmapmux0.0 tso on >/dev/null 2>&1");
 
+	/* --- UL TX checksum offload: force OFF in BOTH configs ---
+	 *
+	 * The IPA UL checksum OFFLOAD is broken on this modem. When the stack
+	 * defers the L4 checksum (NETIF_F_IP_CSUM advertised → tx-checksum-ipv4:
+	 * on → CHECKSUM_PARTIAL skbs) and the IPA HW is asked to complete it,
+	 * the result is wrong and the peer drops every TCP/UDP uplink packet.
+	 * ICMP (which takes rmnet's memset-zeroed-header sw_csum path, never
+	 * offloaded) is unaffected — that's the tell.
+	 *
+	 * Proven on-device 2026-06-12 to a ping-OK server: tx-checksum ON →
+	 * TCP UL 0/10; tx-checksum OFF → TCP UL 10/10. Turning it off makes the
+	 * stack compute a correct SOFTWARE L4 checksum and rmnet zero the UL
+	 * csum header (sw_csum path in rmnet_map_v4_checksum_uplink_packet), so
+	 * no HW offload is attempted.
+	 *
+	 * Required in BOTH configs:
+	 *  - asymmetric (QMAPv1 UL): no offload completes the deferred csum.
+	 *  - symmetric (QMAPv3 UL, --full-ul): the 8-byte UL header / hdr_len=8
+	 *    pipe is correct, but the csum OFFLOAD itself is broken — so use the
+	 *    same SW-csum path. THIS is what makes symmetric UL actually work:
+	 *    it lifts UL from ~65 KB/s to ~26 Mbit/s (the win is QMAPv3 UL
+	 *    aggregation, independent of the offload), and resolves the old
+	 *    "symmetric QMAPv3 UL = 100% packet loss" caveat — that loss was the
+	 *    broken offload, not the QMAPv3 UL format.
+	 *
+	 * Verify: ethtool -k qmapmux0.0 | grep tx-checksum-ipv4   # = off
+	 */
+	try_cmd("qmapmux0.0 tx-checksum OFF (IPA UL csum offload is broken — SW csum)",
+		"ethtool -K qmapmux0.0 tx-checksum-ipv4 off "
+		"tx-checksum-ipv6 off >/dev/null 2>&1");
+	try_cmd_opt("rmnet_ipa0 tx-checksum OFF",
+		"ethtool -K rmnet_ipa0 tx-checksum-ipv4 off "
+		"tx-checksum-ipv6 off >/dev/null 2>&1");
+	state_record("rmnet_ul_txcsum",
+		ctx->full_ul ? "off (QMAPv3 UL — SW csum; HW offload broken)"
+			     : "off (QMAPv1 UL — SW csum)");
+
 	/* --- RPS masks --- */
 	try_write("/sys/class/net/rmnet_ipa0/queues/rx-0/rps_cpus", "2");
 	try_write("/sys/class/net/qmapmux0.0/queues/rx-0/rps_cpus", "4");

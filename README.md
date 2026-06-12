@@ -15,6 +15,9 @@ mainline-ish kernel (6.19).
 ```
 .
 ├── POSTMARKETOS_X00TD_CELLULAR.md    ← the full writeup. START HERE.
+├── DEVICE-SETUP.md                   ← step-by-step: bring up cellular on a
+│                                       flashed device + the symmetric-UL and
+│                                       reliable-HTTPS opt-ins.
 ├── vendor-baseline-4.19/             ← pristine vendor 4.19 sources the
 │                                       port transforms (76 files, GPL-2.0,
 │                                       byte-identical to lineage-sdm660-22.2).
@@ -43,7 +46,9 @@ mainline-ish kernel (6.19).
 │   ├── ipa-tx-stall-recovery.patch                (opt-in TX-watchdog stall
 │   │                                               recovery; + .DESIGN.md and
 │   │                                               -debugknob.patch companions)
-│   └── *.TESTPLAN.md, powersave-validate.sh        (validation helpers)
+│   ├── ipa-symmetric.conf                          (opt-in modprobe.d:
+│   │                                               symmetric QMAPv3 UL, ~26 Mbit/s)
+│   └── *.TESTPLAN.md, powersave-validate.sh        (validation + bring-up helpers)
 ├── dts/sdm636-asus-x00td-ipa-powersave.dtso       (the overlay source)
 └── vendor-init/                       ← userspace bearer-activation tool
     ├── Makefile
@@ -98,7 +103,12 @@ ported are in **`POSTMARKETOS_X00TD_CELLULAR.md`**.
 ## Status
 
 - Production-OK for the **primary cellular DL path** (20.5 Mbps Vodafone CZ LTE).
-- Symmetric QMAPv3 UL is **opt-in / WIP** (`qmapv3_ul_enable=0` default).
+- Symmetric QMAPv3 UL **works** (UL ~26 Mbit/s, ≈ DL) — opt-in via
+  `qmapv3_ul_enable=1` (boot/modprobe.d) + `vendor-init --full-ul`. The IPA
+  UL csum *offload* is broken on this modem, so `stage_post_tune` runs UL
+  with a software checksum (tx-checksum off); the throughput win is from
+  QMAPv3 UL aggregation. Default remains asymmetric (`qmapv3_ul_enable=0`).
+  See *Troubleshooting* and `patches/qmapv3-ul-symmetric.TESTPLAN.md`.
 - The IPA driver itself is **out-of-tree** and **not upstream-ready**;
   it ports a 4.19 vendor blob forward, with shim layers for mainline
   subsystems it predates.
