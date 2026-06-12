@@ -56,7 +56,8 @@ append_line() {  # $1=file $2=guard-grep $3=line $4=desc
 echo "==> Build-system wiring for drivers/platform/msm/"
 append_line drivers/platform/Kconfig \
 	'drivers/platform/msm/Kconfig' \
-	'source "drivers/platform/msm/Kconfig"' \
+	'
+source "drivers/platform/msm/Kconfig"' \
 	"drivers/platform/Kconfig: source msm/Kconfig"
 append_line drivers/platform/Makefile \
 	'+= msm/' \

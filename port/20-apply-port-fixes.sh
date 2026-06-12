@@ -1310,6 +1310,57 @@ read -r -d '' NEW <<'PORT_EOF' || true
 PORT_EOF
 apply_edit "drivers/platform/msm/ipa/ipa_v2/ipa_utils.c" "ipa_utils.c: empirical double-write of EP route register (bringup carry-over)"
 
+read -r -d '' OLD <<'PORT_EOF' || true
+		if (!ep->valid) {
+			IPAERR("EP (%d) not allocated.\n", ipa_ep_idx);
+			continue;
+		}
+		ipa_sps_irq_control(ep->sys, enable);
+PORT_EOF
+read -r -d '' NEW <<'PORT_EOF' || true
+		if (!ep->valid) {
+			/* Benign during bringup/SSR: this blunt "IRQ-control all
+			 * APPS_CONS pipes" helper runs on every clk enable/disable,
+			 * but a consumer pipe (e.g. APPS_WAN_CONS) is legitimately
+			 * not connected yet. Skip quietly - matches the "Invalid
+			 * client" case above. Was IPAERR (un-throttled) -> flooded
+			 * the log during the Q6 filter-rule install burst. */
+			IPADBG_LOW("EP (%d) not allocated.\n", ipa_ep_idx);
+			continue;
+		}
+		ipa_sps_irq_control(ep->sys, enable);
+PORT_EOF
+apply_edit "drivers/platform/msm/ipa/ipa_v2/ipa_dp.c" "ipa_dp.c: demote EP-not-allocated IPAERR -> IPADBG_LOW (benign during bringup/SSR)"
+
+read -r -d '' OLD <<'PORT_EOF' || true
+		case QMI_IPA_FILTER_ACTION_EXCEPTION_V01:
+			/* Fall through */
+		default:
+			ipa_qmi_ctx->q6_ul_filter_rule[i].action =
+							IPA_PASS_TO_EXCEPTION;
+PORT_EOF
+read -r -d '' NEW <<'PORT_EOF' || true
+		case QMI_IPA_FILTER_ACTION_EXCEPTION_V01:
+			/* Fall through */
+		default:
+			/* Modem leaves filter_action=INVALID(0) on its UL specs
+			 * but sets is_routing_table_index_valid with a modem-range
+			 * index (1/2). Mapping these to PASS_TO_ROUTING so they
+			 * actually install was TRIED and REVERTED: with the rules
+			 * live, TLS uplink records arrive corrupted at the peer
+			 * (server returns bad_record_mac / decode_error alerts;
+			 * plain HTTP and all DL stay byte-perfect). The UL routing
+			 * path mishandles these specs on this mainline port —
+			 * almost certainly a UL checksum-offload interaction. Until
+			 * that is root-caused, keep them as EXCEPTION (dropped by
+			 * the HW validator, UL stays on the clean default route).
+			 * The resulting ":1034 invalid RT tbl" log lines are benign.
+			 */
+			ipa_qmi_ctx->q6_ul_filter_rule[i].action =
+							IPA_PASS_TO_EXCEPTION;
+PORT_EOF
+apply_edit "drivers/platform/msm/ipa/ipa_v2/rmnet_ipa.c" "rmnet_ipa.c: document why modem UL EXCEPTION specs stay EXCEPTION (PASS_TO_ROUTING corrupts TLS UL - TRIED and REVERTED)"
+
 
 section "rmnet_ipa0 netdev behavior on mainline"
 read -r -d '' OLD <<'PORT_EOF' || true

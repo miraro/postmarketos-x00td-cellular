@@ -328,17 +328,72 @@ read -r -d '' NEW <<'PORT_EOF' || true
 }
 
 /*
+ * Resolve the modem-side WAN routing-table index for the local WAN-DL
+ * passthrough filter rules.
+ *
+ * eq_attrib filter rules may only target a MODEM routing table:
+ * __ipa_add_flt_rule() rejects rt_tbl_idx > v{4,6}_modem_rt_index_hi
+ * (== 6 on 2.6L, 3 on v2.0). The historical hardcoded rt_tbl_idx=8
+ * (ipa_dflt_wan_rt — an APPS-range table, 7+) is therefore *always*
+ * bounced with "invalid RT tbl" and these rules never install.
+ *
+ * Query the per-interface ext_props the modem registered (the same
+ * source install_wan_dl_qmi_filter_notify() already uses) for the real
+ * index. Returns IPA_WAN_DL_RT_IDX_NONE if it can't be resolved, in
+ * which case the caller skips the (non-critical) install rather than
+ * pushing a knowingly-invalid index.
+ */
+#define IPA_WAN_DL_RT_IDX_NONE 0xffffffffu
+static u32 wan_dl_modem_rt_tbl_idx(void)
+{
+	struct ipa_ioc_query_intf intf_query;
+	struct ipa_ioc_query_intf_ext_props *ext_q;
+	u32 idx = IPA_WAN_DL_RT_IDX_NONE;
+	const char *vc;
+	size_t sz;
+
+	if (rmnet_index <= 0)
+		return IPA_WAN_DL_RT_IDX_NONE;
+
+	vc = mux_channel[0].vchannel_name;
+	memset(&intf_query, 0, sizeof(intf_query));
+	strscpy(intf_query.name, vc, sizeof(intf_query.name));
+	if (ipa_query_intf(&intf_query) != 0 || intf_query.num_ext_props == 0)
+		return IPA_WAN_DL_RT_IDX_NONE;
+
+	sz = sizeof(*ext_q) +
+	     intf_query.num_ext_props * sizeof(struct ipa_ioc_ext_intf_prop);
+	ext_q = kzalloc(sz, GFP_KERNEL);
+	if (!ext_q)
+		return IPA_WAN_DL_RT_IDX_NONE;
+
+	strscpy(ext_q->name, vc, sizeof(ext_q->name));
+	ext_q->num_ext_props = intf_query.num_ext_props;
+	if (ipa_query_intf_ext_props(ext_q) == 0 && ext_q->num_ext_props > 0)
+		idx = ext_q->ext[0].rt_tbl_idx;
+	kfree(ext_q);
+
+	return idx;
+}
+
+/*
  * Phase 4s: install explicit ICMP catch-all UL filter rule.
  * Replicates vendor IPACM_Wan::config_dft_firewall_rules's ICMP path.
- * Rule: protocol_eq=1 (ICMP), action=PASS_TO_ROUTING, rt_idx=8
- * (= ipa_dflt_wan_rt). Installed for both v4 and v6 like a wildcard.
+ * Rule: protocol_eq=1 (ICMP), action=PASS_TO_ROUTING, rt_idx from
+ * ext_props (modem WAN routing table). Installed for both v4 and v6.
  */
 static int install_icmp_passthrough_rule(void)
 {
 	struct ipa_ioc_add_flt_rule *param;
 	struct ipa_flt_rule_add *flt_rule;
-	u32 pyld_sz;
+	u32 pyld_sz, rt_idx;
 	int rc, total_ok = 0;
+
+	rt_idx = wan_dl_modem_rt_tbl_idx();
+	if (rt_idx == IPA_WAN_DL_RT_IDX_NONE) {
+		IPAWANDBG("WAN-DL modem rt_tbl_idx unavailable, skip ICMP rule\n");
+		return 0;  /* non-critical */
+	}
 
 	pyld_sz = sizeof(struct ipa_ioc_add_flt_rule) +
 		  sizeof(struct ipa_flt_rule_add);
@@ -355,7 +410,7 @@ static int install_icmp_passthrough_rule(void)
 	flt_rule->at_rear = true;
 	flt_rule->flt_rule_hdl = -1;
 	flt_rule->rule.action = IPA_PASS_TO_ROUTING;
-	flt_rule->rule.rt_tbl_idx = 8;  /* ipa_dflt_wan_rt */
+	flt_rule->rule.rt_tbl_idx = rt_idx;  /* modem WAN rt tbl (ext_props) */
 	flt_rule->rule.retain_hdr = true;
 	flt_rule->rule.eq_attrib_type = true;
 	/* protocol_eq: ICMP = 1 (v4) / ICMPv6 = 58 (v6, next_hdr) */
@@ -403,8 +458,14 @@ static int install_mcast_bcast_filter_rules(void)
 {
 	struct ipa_ioc_add_flt_rule *param;
 	struct ipa_flt_rule_add *flt_rule;
-	u32 pyld_sz;
+	u32 pyld_sz, rt_idx;
 	int rc, total_ok = 0;
+
+	rt_idx = wan_dl_modem_rt_tbl_idx();
+	if (rt_idx == IPA_WAN_DL_RT_IDX_NONE) {
+		IPAWANDBG("WAN-DL modem rt_tbl_idx unavailable, skip mcast/bcast rules\n");
+		return 0;  /* non-critical */
+	}
 
 	pyld_sz = sizeof(struct ipa_ioc_add_flt_rule) +
 		  sizeof(struct ipa_flt_rule_add);
@@ -421,7 +482,7 @@ static int install_mcast_bcast_filter_rules(void)
 
 	flt_rule->at_rear = true;
 	flt_rule->rule.action = IPA_PASS_TO_ROUTING;
-	flt_rule->rule.rt_tbl_idx = 8;  /* ipa_dflt_wan_rt */
+	flt_rule->rule.rt_tbl_idx = rt_idx;  /* modem WAN rt tbl (ext_props) */
 	flt_rule->rule.retain_hdr = true;
 	flt_rule->rule.eq_attrib_type = true;
 
