@@ -134,7 +134,9 @@ functional and stable on X00TD.
 The key changes the port introduces, on top of the vendor baseline:
 
 - `rmnet_vnd`: default-enable IP_CSUM features so UL csum offload
-  actually works
+  works **for the QMAPv3-UL path** — but see **Section C.1**: in the
+  default asymmetric production config (`EGRESS_MAP_CKSUMV4` off) this
+  unconditional enable is *harmful* and should be gated
 - `rmnet_ipa`: opt-in QMAPv3 UL via the `qmapv3_ul_enable` module param
 - `rmnet_ipa`: query per-interface `ext_props` for `mux_id` + `rt_tbl_idx`
 - `rmnet/ipa2`: Phase 3 IPACM expansion — GRO_HW, 6-spec QMI,
@@ -250,6 +252,68 @@ expected.
 This change is **necessary if you want UL QMAPv3 (symmetric
 config)**. For the asymmetric DL-only QMAPv3 production config —
 which is what we recommend — it's not strictly required.
+
+#### C.1 — Critical correction (2026-06-12): the unconditional `features` enable is *harmful* in the production config
+
+Re-verified end-to-end against the downstream tree
+(`android_kernel_qcom_sdm660`) and the mainline rmnet sources. The
+"not strictly required" framing above was too soft. In the
+**default asymmetric production config (UL = QMAPv1,
+`EGRESS_MAP_CKSUMV4` OFF)** the `features |= NETIF_F_IP_CSUM |
+NETIF_F_IPV6_CSUM` line (`rmnet_vnd.c:326`) is **actively harmful**,
+and is the prime suspect for the UL TLS corruption (`bad_record_mac`
+at the peer; DL is byte-perfect, plain-TCP tolerates it, TLS does
+not).
+
+Two *independent* checksum layers were being conflated:
+
+1. **rmnet `EGRESS_MAP_CKSUMV4` data_format flag** — controls whether
+   rmnet inserts the 4-byte UL csum header and runs
+   `rmnet_map_v4_checksum_uplink_packet()`. The `memset`-zero
+   fallback (the bug Section C originally describes) only ever runs
+   **when this flag is on** — `rmnet_map_checksum_uplink_packet()` is
+   gated by `if (csum_type)` in `rmnet_handlers.c:143-158`. In the
+   production config this flag is **OFF**, so that path is dormant.
+
+2. **`NETIF_F_IP_CSUM` netdev feature** (`= tx-checksum-ipv4: on` in
+   `ethtool -k`) — independent of the flag above. When it is in
+   `dev->features`, the Linux stack emits UL TCP/UDP skbs as
+   `CHECKSUM_PARTIAL` (L4 checksum *deferred to the device*). But
+   with `EGRESS_MAP_CKSUMV4` OFF, rmnet's egress handler never
+   completes the checksum, and the IPA egress pipe (UL = QMAPv1, no
+   `cs_offload_en`) does not either. The frame leaves with an
+   **incomplete L4 checksum** → corrupted uplink.
+
+So the original change put `NETIF_F_IP_CSUM` into `features`
+**unconditionally**, which is correct *only* when
+`EGRESS_MAP_CKSUMV4` is also active. In the default config (flag OFF)
+it should stay **out of `features`** (keep it in `hw_features` so
+`ethtool -K` can still turn it on for the QMAPv3-UL path).
+
+**Fix options:**
+
+- **Kernel (correct fix):** gate line 326 — only OR
+  `NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM` into `features` when the port
+  will run `EGRESS_MAP_CKSUMV4`/`V5`. Keep them in `hw_features`
+  always.
+- **Userspace (zero-rebuild) — implemented:**
+  `vendor-init/stage_post_tune.c` now disables UL tx-checksum in the
+  non-`full_ul` branch
+  (`ethtool -K qmapmux0.0 tx-checksum-ipv4 off tx-checksum-ipv6 off`,
+  plus the parent `rmnet_ipa0` best-effort), so the stack computes a
+  correct SW checksum. The `--full-ul` branch leaves it on (QMAPv3 UL
+  needs the offload). Confirm on-device with
+  `ethtool -k qmapmux0.0 | grep tx-checksum-ipv4` (must read `off`),
+  then re-test HTTPS upload.
+
+**`vendor-init` itself is clean — no bug there.** It correctly keeps
+`full_ul = 0` by default (only `-U`/`--full-ul` sets it), sends
+`WDA ul_data_agg_proto = 5` (QMAPv1), and does **not** set
+`egress-mapv4-checksum` in the default branch
+(`stage_post_tune.c:135-150`, well-commented). The `tx-checksum-ipv4:
+on` observed on-device originates **solely** from the kernel
+`rmnet_vnd.c:326` line, a different layer than anything vendor-init
+configures.
 
 ---
 
@@ -617,6 +681,40 @@ What we know:
   windows, both directions). We empirically probed larger AGG
   windows during bringup (phases 4m/4n: 16 K/20) — **no throughput
   change**, the cap at the test site was carrier-side, not AP-side.
+- **DL deaggregation is *software*, not a HW DEAGGR engine.** A
+  common mental model — "IPA's `IPA_ENDP_INIT_DEAGGR` engine
+  (`aggr_type = QCMAP`) splits one BAM frame into N skbs in
+  hardware" — is **not** how the WAN_CONS RX path works on v2.6L
+  (verified in `android_kernel_qcom_sdm660/.../ipa_v2`). What
+  actually happens:
+  - The RX endpoint uses **GENERIC aggregation**
+    (`aggr_en = IPA_ENABLE_AGGR`, `aggr = IPA_GENERIC`; `ipa_dp.c`
+    `ipa2_cfg_ep_*` defaults). The HW only *packs* incoming packets
+    into one buffer up to the byte/pkt/time limit and closes it on
+    EOF — it does **not** parse QMAP sub-frame boundaries.
+  - QMAP-level splitting is done in **software**, in one of two
+    modes selected by `ipa_client_apps_wan_cons_agg_gro`:
+    - **GRO mode** (flag true, set when the modem negotiates
+      `RMNET_IOCTL_INGRESS_FORMAT_AGG_DATA`): the whole closed
+      aggregate is handed straight up via
+      `client_notify(IPA_RECEIVE, skb)` (`ipa_dp.c`
+      `ipa_wan_rx_pyld_hdlr`) and rmnet/`gro_cells` splits the QMAP
+      sub-frames. IPA per-packet status is **disabled**
+      (`status_en = false`) in this mode.
+    - **Status mode** (flag false): IPA HW writes an
+      `ipa_hw_pkt_status` descriptor before each QMAP frame and the
+      kernel parses them in the `ipa_wan_rx_pyld_hdlr` while-loop
+      (reads `pkt_len` from the big-endian QMAP header, handles the
+      csum trailer).
+  - `ipa2_disable_apps_wan_cons_deaggr()` is **misleadingly named**:
+    it configures no HW deaggregation — it just validates
+    `agg_size/agg_count` against the IPA limits and sets the
+    `agg_gro` flag to pick GRO mode.
+  - **Why this matters here:** this whole path is **DL/RX** and is
+    *proven working* (20.5 Mbps, md5-verified). Aggregation is **not**
+    the broken layer. The open UL issue lives on the **egress/TX**
+    side (checksum offload — see Section C.1), an entirely separate
+    code path.
 - **The known AP-side wart** is the ~1 Hz SPS EOT interrupt on the
   WAN RX pipe, worked around by NAPI re-polling; the
   `ipa_wan_busypoll` knob exists for experiments on other devices.
@@ -742,6 +840,145 @@ patch -p1 < patches/sdm636-asus-x00td-ipa-powersave-dtbo.patch
 ---
 
 ## Known caveats
+
+### TLS/HTTPS handshake fails intermittently — the cellular path mishandles the large post-quantum ClientHello (NOT the port)
+
+**ROOT CAUSE (2026-06-12, on-device): only the large post-quantum
+ClientHello fails, and only over cellular.** OpenSSL 3.5 (shipped in the
+rootfs) offers `X25519MLKEM768` by default; its ML-KEM key_share makes the
+ClientHello ~1521 B, which spans **two TCP segments** (≈1388 + ≈133). The
+cellular path intermittently mishandles delivery of that two-segment
+ClientHello, so the server gets a malformed/incomplete record and replies
+`decode_error` (or the record layer fails). Clean, interleaved on-device
+tests (python `ssl`, same IP, controls for time):
+
+| ClientHello | result |
+|---|---|
+| TLS 1.3 default = **post-quantum, ~1521 B, 2 segments** | 34/40 (and 20/25) — **~15 % fail** |
+| TLS 1.2 = **classical, ~250 B, 1 segment** | **40/40, 25/25 — 0 fail** |
+| reverse-tether (non-cellular) with PQ large CH | **50/50 — 0 fail** |
+
+Protocol/server matrix (cellular, handshake-only): **only Cloudflare HTTPS
+fails (21/25); google / seznam / httpbin HTTPS and all plain HTTP are
+25/25** — because those servers don't negotiate the PQ hybrid, so their
+ClientHello stays small/single-segment.
+
+**This resolves the "why no mass outage" paradox:** post-quantum key
+exchange is brand new (2024+) and rarely used, so this never showed up as
+generic TLS breakage. It is **not** a carrier-wide TLS corruptor and
+**not** the driver/port (the data plane is byte-perfect; the captured
+ClientHello *leaving* the device is valid; the issue is the cellular
+delivery of the specific large 2-segment handshake packet).
+
+**Workarounds (pick one):**
+- **Force classical key exchange / disable the PQ hybrid** → small
+  single-segment ClientHello → 100 % reliable. System-wide via OpenSSL
+  config (`/etc/ssl/openssl.cnf`, `[system_default_sect]` →
+  `Groups = x25519:secp256r1:x448:...` without `MLKEM`), or per-app
+  (`curl --curves X25519`). Minor tradeoff: drops quantum-resistant KEX
+  (almost nothing depends on it yet).
+- **Retry** on handshake failure (intermittent → ~99 % after 1-2 retries).
+- **VPN** (encapsulates the handshake; reverse-tether proved this works).
+
+**Still open (low prio):** exact culprit on the cellular path (modem UL
+segmentation vs a carrier TCP normaliser) for the 2-segment CH — would
+need stock-ROM / other-phone A/B. The USB-tether A/B already proves it is
+the cellular path, not the device.
+
+---
+
+#### Supporting evidence & how the cause was narrowed
+
+The symptom: HTTPS handshakes fail intermittently with `decode_error` /
+`bad_record_mac`, while plain HTTP and bulk transfers are byte-perfect
+**both directions**. The tests below excluded every data-plane / device
+cause and led to the post-quantum-ClientHello root cause above.
+
+**What was EXCLUDED (each by direct test):**
+
+| test | result | excludes |
+|---|---|---|
+| `ethtool -K … tx-checksum off` | still fails | UL csum offload |
+| `ethtool -K … rx off` (SW-verify DL) | still fails | DL csum masking |
+| `ethtool -K … gro/rx-gro-hw off` | still fails | DL receive-coalescing |
+| 10 MB random file downloaded ×2 | md5 identical | **DL byte corruption** |
+| 40× 20 KB random binary HTTP POST → httpbin (base64 reflect), md5 | **40/40 match** | **UL+DL byte corruption** (p(0/40 \| 15 %)≈0.0015) |
+| TLS handshake loop on `:443` vs `:2053` vs `:8443` | all fail ~similar | a 443-only middlebox |
+| `tcpdump` of failing handshakes | both dirs TCP-clean, no retransmit | packet loss / TCP rewrite |
+
+So **neither direction corrupts bytes** (40/40 connections byte-perfect),
+the handshake TCP stream is intact, yet TLS fails on every port. It is
+**not** checksum, aggregation, GRO, filter rules, byte corruption, or
+port-specific.
+
+**Capture detail (corroborates the PQ root cause).** A failing handshake
+captured at `qmapmux0.0` showed the device *sends* a complete, valid
+ClientHello (record `16 03 01 05 ec`, len 1516 → **1521 B total = the
+large PQ CH**), split across **two TCP segments**. The server ACKs all
+1521 bytes but returns `decode_error` with no ServerHello → it parsed a
+malformed/incomplete ClientHello. The bytes *leaving* the device are
+valid and plain HTTP/random binary are byte-perfect (100+/100), so the
+mishandling is **downstream on the cellular path and specific to the large
+two-segment handshake packet** — not byte corruption, not the driver.
+
+**Reverse-tether A/B (2026-06-12).** Same phone, same TLS
+stack, same target (`104.16.133.229`, SNI `cloudflare.com`), same 50×
+loop — only the egress path differs:
+
+| egress path | result |
+|---|---|
+| reverse USB-tether → host's home internet (**bypasses modem+cellular**) | **50/50 OK, 0 fail** |
+| cellular (`qmapmux0.0`) | 47/50 OK, **3 fail** (`record layer failure`) |
+
+Identical device + TLS, perfect off-cellular vs ~6 % broken on cellular →
+the ClientHello rewrite is **definitively in the cellular data path
+(modem firmware or Vodafone), not the device/driver.** (The USB path
+bypasses *both* modem and carrier, so it confirms "cellular path" but does
+not by itself separate modem from carrier — that still needs a stock-ROM /
+other-phone test on the same SIM.)
+
+**Impact: low.** Established connections, throughput (20 Mbps), data
+integrity, and all non-TLS traffic are unaffected; only ~6-15 % of *new*
+TLS handshakes fail and almost everything retries (→ ~99 % effective).
+
+**Remaining open (low priority): modem vs carrier.** Confirm on stock ROM
+/ another phone on the same SIM+APN, or via a VPN (tunneling hides the
+ClientHello — should be reliable). Workarounds if it ever matters: VPN,
+different APN, or TLS ECH.
+
+> **Retracted dead-end (kept as a warning):** an earlier pass concluded
+> the UL path "strips `0x0D` (CR) bytes." That was a **measurement
+> artifact of `tcpbin.com`**, which is a *line-oriented* echo service that
+> normalizes/strips CR itself — verified by running the same CR echo from
+> a wired host (CR also stripped there, off-cellular). **Do not use
+> `tcpbin.com` for binary integrity tests.** Use httpbin's base64
+> reflection (`http://httpbin.org/post`, field `data` =
+> `data:…;base64,…`) instead. The `NETIF_F_IP_CSUM` theory (Section C.1)
+> was likewise disproven.
+
+**Still-open leads (byte-clean ⇒ TLS-path-specific):**
+- **Port-443-specific middlebox?** Compare handshake failure rate on
+  `:443` vs an alternate TLS port (`cloudflare.com:2053` / `:8443`). If
+  alt ports are reliable and `:443` is not → a 443-only middlebox
+  (carrier DPI / "optimizer"). If all ports fail equally → packet-pattern
+  / handshake-timing issue independent of port.
+- **Handshake packet pattern.** Both directions clean for bulk; only the
+  sparse request/response burst of a handshake fails — points at
+  timing/pattern handling somewhere in IPA/modem, not data integrity.
+- Disambiguate device-vs-carrier by repeating on the **stock/vendor ROM**
+  or another phone on the same SIM/APN.
+
+**Binary-clean UL reproducer (no tcpbin):**
+```sh
+python3 - <<'EOF'
+import urllib.request,os,json,base64,hashlib
+d=os.urandom(40000)
+r=urllib.request.urlopen(urllib.request.Request("http://httpbin.org/post",
+    data=d,headers={"Content-Type":"application/octet-stream"}),timeout=25)
+g=base64.b64decode(json.loads(r.read())["data"].split(",",1)[1])
+print("UL clean:", hashlib.md5(g).hexdigest()==hashlib.md5(d).hexdigest())
+EOF
+```
 
 ### Symmetric QMAPv3 UL is not fully working
 
